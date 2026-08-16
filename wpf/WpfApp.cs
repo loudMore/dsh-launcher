@@ -9,6 +9,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
@@ -120,10 +121,20 @@ namespace DeepSeekHarness
             // 单实例: 已在运行则发信号让旧窗口弹出, 自己退出
             // 隐藏参数 --sandbox: 换独立 Mutex 名, 允许与生产实例并存 (仅供隔离测试)
             bool sandbox = false;
-            try { foreach (string a in Environment.GetCommandLineArgs()) if (a == "--sandbox") sandbox = true; } catch { }
+            bool diagTest = false;
+            try
+            {
+                foreach (string a in Environment.GetCommandLineArgs())
+                {
+                    if (a == "--sandbox") sandbox = true;
+                    if (a == "--diag-test") diagTest = true;
+                }
+            }
+            catch { }
             bool createdNew;
             singletonMutex = new Mutex(true, "DeepSeekHarness.Launcher.WPF.v1" + (sandbox ? ".sandbox" : ""), out createdNew);
             if (sandbox) Dsh.SandboxMode = true;
+            if (diagTest) Dsh.DiagTestMode = true;
             if (!createdNew)
             {
                 try { File.WriteAllText(Proc.ReopenFlagPath(), "1"); } catch { }
@@ -262,7 +273,7 @@ namespace DeepSeekHarness
             stack.Children.Add(logoEl);
             stack.Children.Add(new TextBlock { Text = "DeepSeek Harness Launcher", Foreground = Palette.Brush(Palette.Text), FontSize = 19, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 16, 0, 0) });
             stack.Children.Add(new TextBlock { Text = Lang.T("DSH 启动器 · WPF 旗舰版"), Foreground = Palette.Brush(Palette.TextDim), FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0) });
-            stack.Children.Add(new TextBlock { Text = "v1.0.8 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 0) });
+            stack.Children.Add(new TextBlock { Text = "v" + Dsh.LauncherVersion + " · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 0) });
             // 加载动画条
             var bar = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Palette.Brush(Palette.BgInput), Margin = new Thickness(30, 16, 30, 0) };
             var fill = new Border { Width = 60, CornerRadius = new CornerRadius(2), Background = Palette.Brush(Palette.Blue), HorizontalAlignment = HorizontalAlignment.Left };
@@ -428,13 +439,15 @@ namespace DeepSeekHarness
         TextBlock upDshCur, upDshLatest, upDshNote;
         TextBlock upPluginNote;
         Button upLupGo, upDshUp, upPluginUp;
+        System.Windows.Controls.ProgressBar upLupProg;
+        TextBlock upLupStatus;
         string lupLatestStr = "";
 
         // 语义化版本比较: 当前启动器版本 vs 远端版本 (避免字符串硬编码误判)
         bool IsLauncherNewer()
         {
             Version cur, latest;
-            if (!Version.TryParse("1.0.8", out cur)) return false;
+            if (!Version.TryParse(Dsh.LauncherVersion, out cur)) return false;
             if (!Version.TryParse(lupLatestStr, out latest)) return false;
             return latest > cur;
         }
@@ -730,7 +743,7 @@ namespace DeepSeekHarness
                 Margin = new Thickness(8, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            badge.Child = new TextBlock { Text = "v1.0.8", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 10, FontWeight = FontWeights.Bold };
+            badge.Child = new TextBlock { Text = "v" + Dsh.LauncherVersion, Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 10, FontWeight = FontWeights.Bold };
             brand.Children.Add(title);
             brand.Children.Add(badge);
 
@@ -876,7 +889,7 @@ namespace DeepSeekHarness
 
             sbRight = new TextBlock
             {
-                Text = "端口 8099 · 启动器 v1.0.8 (WPF)",
+                Text = string.Format(Lang.T("端口 {0} · 启动器 v{1} (WPF)"), dsh.Cfg.Port, Dsh.LauncherVersion),
                 Foreground = Palette.Brush(Palette.TextFaint),
                 FontSize = 12,
                 HorizontalAlignment = HorizontalAlignment.Right,
@@ -1215,6 +1228,13 @@ namespace DeepSeekHarness
                 try { p = dsh.ResolveProxy(); } catch { }          // 后台: 端口扫描可能耗时
                 var env = dsh.DetectEnvironment();
                 dsh.Env = env;
+                // 启动环境摘要写日志 (诊断包关键内容)
+                dsh.AppendLog("[env] Node=" + (string.IsNullOrEmpty(env.NodePath) ? "MISSING" : env.NodeVersion + " @" + env.NodePath)
+                    + " | npm=" + (string.IsNullOrEmpty(env.NpmPath) ? "MISSING" : env.NpmVersion)
+                    + " | Git=" + (string.IsNullOrEmpty(env.GitPath) ? "MISSING" : CleanVer(env.GitVersion))
+                    + " | dsh=" + (string.IsNullOrEmpty(env.DshPath) ? "MISSING" : env.DshVersion + " @" + env.DshPath)
+                    + " | port=" + dsh.Cfg.Port + (Dsh.IsPortOpen(dsh.Cfg.Port) ? " LISTENING" : " closed")
+                    + " | proxy=" + (string.IsNullOrEmpty(dsh.Cfg.Proxy) ? "(none)" : dsh.Cfg.Proxy));
                 Dispatcher.BeginInvoke(new Action(delegate { lastProxy = p; RenderOverview(); RenderEnv(); }));
                 if (dsh.Cfg.CheckUpdatesOnStart)
                 {
@@ -1230,7 +1250,7 @@ namespace DeepSeekHarness
                             upLupLatest.Text = "最新 " + lupLatest;
                             lupLatestStr = lupLatest;
                             bool newer = IsLauncherNewer();
-                            upLupNote.Text = newer ? "发现新版本，可前往 GitHub 下载" : "已是最新版本";
+                            upLupNote.Text = newer ? "发现新版本，点击「立即升级」即可自动更新" : "已是最新版本";
                             upLupNote.Foreground = Palette.Brush(newer ? Palette.Warn : Palette.TextFaint);
                             RenderUpdate();
                         }));
@@ -1309,6 +1329,17 @@ namespace DeepSeekHarness
             updTimer.Start();
             // 后台预热插件本地版本 (异步, 不阻塞 UI)
             RefreshPluginHashes();
+            // 自动化测试钩子 (--diag-test): 等启动检测完成后自动导出诊断包并退出
+            if (Dsh.DiagTestMode)
+            {
+                var dt = new Thread(delegate()
+                {
+                    Thread.Sleep(15000);
+                    Dispatcher.BeginInvoke(new Action(delegate { ExportDiag(); }));
+                });
+                dt.IsBackground = true;
+                dt.Start();
+            }
         }
 
         void RenderOverview()
@@ -1399,7 +1430,7 @@ namespace DeepSeekHarness
                 sbDot.Effect = running ? Palette.GlowEffect(Palette.Success, 0.7) : null;
                 sbText.Text = running ? Lang.T("服务已在运行") : Lang.T("服务未启动");
             }
-            sbRight.Text = string.Format(Lang.T("端口 {0} · 启动器 v1.0.8 (WPF)"), dsh.Cfg.Port);
+            sbRight.Text = string.Format(Lang.T("端口 {0} · 启动器 v{1} (WPF)"), dsh.Cfg.Port, Dsh.LauncherVersion);
             }
             catch { }
         }
@@ -1827,9 +1858,12 @@ namespace DeepSeekHarness
             envRows.Children.Clear();
             var env = dsh.Env;
             bool dshMissing = string.IsNullOrEmpty(env.DshPath);
+            // 引导卡: 四项中任一缺失都展示 (Node/npm/Git/dsh), 让新手一眼看清缺什么
+            bool anyMissing = string.IsNullOrEmpty(env.NodePath) || string.IsNullOrEmpty(env.NpmPath)
+                || string.IsNullOrEmpty(env.GitPath) || dshMissing;
             if (envGuideCard != null)
-                envGuideCard.Visibility = dshMissing ? Visibility.Visible : Visibility.Collapsed;
-            if (envGuideDetail != null && dshMissing)
+                envGuideCard.Visibility = anyMissing ? Visibility.Visible : Visibility.Collapsed;
+            if (envGuideDetail != null && anyMissing)
             {
                 string[] gnm = { "Node.js", "npm", "Git", "dsh" };
                 string[] gpp = { env.NodePath, env.NpmPath, env.GitPath, env.DshPath };
@@ -1895,6 +1929,13 @@ namespace DeepSeekHarness
                 try { dsh.ResolveProxy(); } catch { }
                 var env = dsh.DetectEnvironment();
                 dsh.Env = env;
+                // 环境摘要写日志 (诊断包关键内容)
+                dsh.AppendLog("[env] Node=" + (string.IsNullOrEmpty(env.NodePath) ? "MISSING" : env.NodeVersion + " @" + env.NodePath)
+                    + " | npm=" + (string.IsNullOrEmpty(env.NpmPath) ? "MISSING" : env.NpmVersion)
+                    + " | Git=" + (string.IsNullOrEmpty(env.GitPath) ? "MISSING" : CleanVer(env.GitVersion))
+                    + " | dsh=" + (string.IsNullOrEmpty(env.DshPath) ? "MISSING" : env.DshVersion + " @" + env.DshPath)
+                    + " | port=" + dsh.Cfg.Port + (Dsh.IsPortOpen(dsh.Cfg.Port) ? " LISTENING" : " closed")
+                    + " | proxy=" + (string.IsNullOrEmpty(dsh.Cfg.Proxy) ? "(none)" : dsh.Cfg.Proxy));
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     RenderEnv();
@@ -1927,6 +1968,7 @@ namespace DeepSeekHarness
                 "如需自定义安装目录，请在下方修改目标文件夹；直接点「确定安装」用默认目录：\n" + defaultPath,
                 defaultPath
             );
+            if (string.IsNullOrEmpty(customPath)) customPath = defaultPath;   // 用户清空输入 → 用默认目录, 不静默取消
             if (string.IsNullOrEmpty(customPath)) return;
 
             sbText.Text = "正在安装环境…";
@@ -1969,7 +2011,7 @@ namespace DeepSeekHarness
             toolbar.Children.Add(Btn("↻ " + Lang.T("刷新列表"), delegate { RefreshPluginHashes(); pageDirty[2] = true; RenderPlugins(); }, false));
             toolbar.Children.Add(Btn("↓ " + Lang.T("安装插件"), delegate { InstallPluginPrompt(); }, false));
             toolbar.Children.Add(Btn("🛍 " + Lang.T("插件商城"), delegate { OpenStore(); }, true));
-            toolbar.Children.Add(Btn("↻ " + Lang.T("全部更新"), delegate { UpdateAllPlugins(); }, false));
+            // 全部更新已并入「一键维护」(更新+修依赖一键搞定), 避免功能重复 
             toolbar.Children.Add(Btn(Lang.T("一键维护"), delegate { MaintainPlugins(); }, false));
             toolbar.Children.Add(Btn(Lang.T("打开插件目录"), delegate { OpenPluginsDir(); }, false));
             stack.Children.Add(toolbar);
@@ -2242,14 +2284,19 @@ namespace DeepSeekHarness
             lupTitleRow.Children.Add(new TextBlock { Text = "🚀 ", FontSize = 13, VerticalAlignment = VerticalAlignment.Center });
             lupTitleRow.Children.Add(new TextBlock { Text = Lang.T("启动器") + " (Launcher)", Foreground = Palette.Brush(Palette.Text), FontSize = 12, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
             lupCol.Children.Add(lupTitleRow);
-            upLupCur = new TextBlock { Text = Lang.T("当前") + " v1.0.8", Foreground = Palette.Brush(Palette.Text), FontSize = 14, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0) };
+            upLupCur = new TextBlock { Text = Lang.T("当前") + " v" + Dsh.LauncherVersion, Foreground = Palette.Brush(Palette.Text), FontSize = 14, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0) };
             upLupLatest = new TextBlock { Text = Lang.T("未检查"), Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 2, 0, 0) };
             upLupNote = new TextBlock { Text = "", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
             lupCol.Children.Add(upLupCur);
             lupCol.Children.Add(upLupLatest);
             lupCol.Children.Add(upLupNote);
+            // 自更新进度条 + 状态 (默认隐藏)
+            upLupProg = new System.Windows.Controls.ProgressBar { Height = 6, Minimum = 0, Maximum = 100, Value = 0, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 6, 0, 0) };
+            lupCol.Children.Add(upLupProg);
+            upLupStatus = new TextBlock { Text = "", Foreground = Palette.Brush(Palette.BlueLight), FontSize = 12, TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 3, 0, 0) };
+            lupCol.Children.Add(upLupStatus);
             lup.Children.Add(lupCol);
-            upLupGo = Btn(Lang.T("前往 GitHub"), delegate { try { Process.Start("https://github.com/loudMore/dsh-launcher/releases"); } catch { } }, false);
+            upLupGo = Btn("🚀 " + Lang.T("立即升级"), delegate { UpgradeLauncher(); }, false);
             Grid.SetColumn(upLupGo, 2);
             lup.Children.Add(upLupGo);
             stack.Children.Add(Card(lup));
@@ -2344,7 +2391,8 @@ namespace DeepSeekHarness
             if (upLupGo != null)
             {
                 bool lupNewer = IsLauncherNewer();
-                SetBtnState(upLupGo, lupNewer, lupNewer ? Lang.T("前往 GitHub") : "✓ " + Lang.T("已是最新"));
+                // 有新版 → "立即升级" (点按钮直接自更新, 不再把用户赶去 GitHub)
+                SetBtnState(upLupGo, lupNewer, lupNewer ? "🚀 " + Lang.T("立即升级") + " v" + lupLatestStr : "✓ " + Lang.T("已是最新"));
             }
         }
 
@@ -2374,11 +2422,118 @@ namespace DeepSeekHarness
                         lupLatestStr = lupLatest;
                         newer = IsLauncherNewer();
                     }
-                    upLupNote.Text = newer ? "发现新版本，可前往 GitHub 下载" : "已是最新版本";
+                    upLupNote.Text = newer ? "发现新版本，点击「立即升级」即可自动更新" : "已是最新版本";
                     upLupNote.Foreground = Palette.Brush(newer ? Palette.Warn : Palette.TextFaint);
                     SetUpdateChecking(false);
                     RenderUpdate();
                     MarkDirty(3); sbText.Text = "检查更新完成";
+                }));
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        // ---------- 启动器自更新: 下载(带进度) → 校验 → 守护替换 → 自动重启 ----------
+        void UpgradeLauncher()
+        {
+            string ver = lupLatestStr;
+            if (string.IsNullOrEmpty(ver))
+            {
+                ShowModernInfo(this, "升级启动器", "请先点击「检查更新」，确认有新版后再升级。");
+                return;
+            }
+            if (!IsLauncherNewer())
+            {
+                ShowModernInfo(this, "升级启动器", "已是最新版本，无需升级。");
+                return;
+            }
+            if (Dsh.SandboxMode)
+            {
+                // 沙盒: 只做"下载+校验"演练(写入 %TEMP% 临时文件), 绝不替换真实 exe
+                sbText.Text = "正在下载新版启动器（沙盒演练）…";
+                upLupGo.IsEnabled = false;
+                upLupProg.Visibility = Visibility.Visible;
+                upLupStatus.Visibility = Visibility.Visible;
+                upLupStatus.Text = "正在下载并校验 v" + ver + " …";
+                SetBusy(true);
+                var st = new Thread(delegate()
+                {
+                    string destPath;
+                    string error;
+                    bool ok2 = dsh.DownloadLauncherUpdate(ver, out destPath, out error, delegate(int pct)
+                    {
+                        Dispatcher.BeginInvoke(new Action(delegate
+                        {
+                            upLupProg.Value = pct;
+                            upLupStatus.Text = "正在下载并校验 v" + ver + " … " + pct + "%";
+                        }));
+                    });
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        SetBusy(false);
+                        upLupGo.IsEnabled = true;
+                        if (ok2)
+                        {
+                            upLupProg.Value = 100;
+                            upLupStatus.Text = "沙盒演练：下载校验通过（" + destPath + "）";
+                            ShowModernInfo(this, "升级启动器（沙盒演练）", "下载与校验成功！\n" + destPath + "\n\n沙盒模式不执行真实替换重启。");
+                        }
+                        else
+                        {
+                            upLupProg.Visibility = Visibility.Collapsed;
+                            upLupStatus.Text = "";
+                            ShowModernWarn(this, "升级启动器", "下载失败：\n" + error + "\n\n可稍后重试，或到 GitHub 手动下载。");
+                        }
+                    }));
+                });
+                st.IsBackground = true;
+                st.Start();
+                return;
+            }
+            bool ok = ShowModernConfirm(this, "升级启动器",
+                "将自动下载 启动器 v" + ver + " 并替换升级，全程不用你操作。\n\n" +
+                "升级完软件会自动重启，不影响 dsh 服务运行。\n\n确定开始升级？");
+            if (!ok) return;
+
+            sbText.Text = "正在下载新版启动器…";
+            upLupGo.IsEnabled = false;
+            upLupProg.Visibility = Visibility.Visible;
+            upLupStatus.Visibility = Visibility.Visible;
+            upLupStatus.Text = "正在下载 v" + ver + " …";
+            SetBusy(true);
+            var t = new Thread(delegate()
+            {
+                string destPath;
+                string error;
+                bool ok2 = dsh.DownloadLauncherUpdate(ver, out destPath, out error, delegate(int pct)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        upLupProg.Value = pct;
+                        upLupStatus.Text = "正在下载 v" + ver + " … " + pct + "%";
+                    }));
+                });
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    if (!ok2)
+                    {
+                        SetBusy(false);
+                        upLupProg.Visibility = Visibility.Collapsed;
+                        upLupStatus.Visibility = Visibility.Collapsed;
+                        upLupGo.IsEnabled = true;
+                        upLupStatus.Text = "";
+                        ShowModernWarn(this, "升级启动器", "下载失败：\n" + error + "\n\n可稍后重试，或到 GitHub 手动下载。");
+                        return;
+                    }
+                    upLupProg.Value = 100;
+                    upLupStatus.Text = "下载完成，正在重启升级…";
+                    sbText.Text = "升级完成，正在重启…";
+                    // 调用守护替换 (spawn updater), 然后正常退出让 updater 接管重启
+                    dsh.ApplyLauncherUpdate(destPath);
+                    try { Thread.Sleep(1500); } catch { }   // 给 updater 一点启动时间
+                    quitting = true;
+                    Close();
+                    Application.Current.Shutdown();
                 }));
             });
             t.IsBackground = true;
@@ -2475,7 +2630,7 @@ namespace DeepSeekHarness
             var rightBar = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
             rightBar.Children.Add(Btn("↻ " + Lang.T("刷新列表"), delegate { RefreshLog(); }, false));
             rightBar.Children.Add(Btn("📋 " + Lang.T("复制日志"), delegate { CopyLog(); }, false));
-            rightBar.Children.Add(Btn("🧹 " + Lang.T("清空显示"), delegate { ClearLog(); }, false));
+            rightBar.Children.Add(Btn("🧹 " + Lang.T("清空界面"), delegate { ClearLog(); }, false));
             rightBar.Children.Add(Btn("📂 " + Lang.T("打开日志目录"), delegate { try { Process.Start("explorer.exe", "\"" + dsh.Cfg.LogDir + "\""); } catch { } }, false));
             Grid.SetColumn(rightBar, 1);
             toolbarGrid.Children.Add(rightBar);
@@ -2664,6 +2819,7 @@ namespace DeepSeekHarness
             btnRow.Children.Add(Btn("↻ " + Lang.T("自动检测回填"), delegate { AutoFillSettings(); }, false));
             btnRow.Children.Add(Btn("⚡ " + Lang.T("检测代理"), delegate { DetectProxyFill(); }, false));
             btnRow.Children.Add(Btn("📌 " + Lang.T("桌面快捷方式"), delegate { MakeShortcut(); }, false));
+            btnRow.Children.Add(Btn("📤 " + Lang.T("导出诊断包"), delegate { ExportDiag(); }, false));
             btnRow.Children.Add(Btn("📄 " + Lang.T("配置文件"), delegate { try { Process.Start("notepad.exe", "\"" + LauncherConfig.ConfigPath + "\""); } catch { } }, false));
             btnRow.Children.Add(Btn("ℹ️ " + Lang.T("关于"), delegate { ShowAbout(); }, false));
             stack.Children.Add(btnRow);
@@ -2707,7 +2863,7 @@ namespace DeepSeekHarness
             }
             var headText = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
             headText.Children.Add(new TextBlock { Text = "DeepSeek Harness Launcher", Foreground = Palette.Brush(Palette.Text), FontSize = 16, FontWeight = FontWeights.Bold });
-            headText.Children.Add(new TextBlock { Text = "v1.0.8 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 3, 0, 0) });
+            headText.Children.Add(new TextBlock { Text = "v" + Dsh.LauncherVersion + " · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 3, 0, 0) });
             head.Children.Add(headText);
             Grid.SetRow(head, 0);
             g.Children.Add(head);
@@ -2800,8 +2956,17 @@ namespace DeepSeekHarness
 
         void SaveSettings()
         {
-            int port;
-            if (int.TryParse(setBoxes["port"].Text.Trim(), out port)) dsh.Cfg.Port = port;
+            int oldPort = dsh.Cfg.Port;
+            int port = oldPort;
+            if (int.TryParse(setBoxes["port"].Text.Trim(), out port))
+            {
+                if (port < 1 || port > 65535)
+                {
+                    ShowModernWarn(this, "设置", "端口无效：请输入 1~65535 之间的数字。");
+                    return;
+                }
+                dsh.Cfg.Port = port;
+            }
             dsh.Cfg.DshHome = setBoxes["home"].Text.Trim();
             dsh.Cfg.PluginsRoot = setBoxes["plugins"].Text.Trim();
             dsh.Cfg.LogDir = setBoxes["log"].Text.Trim();
@@ -2812,12 +2977,86 @@ namespace DeepSeekHarness
             int langSi = setLang != null ? setLang.SelectedIndex : 0;
             dsh.Cfg.Language = langSi == 1 ? "zh" : (langSi == 2 ? "en" : (langSi == 3 ? "ja" : (langSi == 4 ? "ko" : (langSi == 5 ? "ru" : (langSi == 6 ? "fr" : (langSi == 7 ? "de" : (langSi == 8 ? "es" : "")))))));
             dsh.Cfg.ApplyDefaults();
-            if (dsh.Cfg.Save())
+            if (!dsh.Cfg.Save())
             {
-                MarkDirty(0); MarkDirty(1); sbText.Text = "设置已保存";
+                ShowModernWarn(this, "设置", "设置保存失败（配置文件可能被占用或无权限）。");
+                return;
+            }
+            dsh.AppendLog("[settings] 已保存: port=" + dsh.Cfg.Port + " home=" + dsh.Cfg.DshHome + " plugins=" + dsh.Cfg.PluginsRoot
+                + " proxy=" + (string.IsNullOrEmpty(dsh.Cfg.Proxy) ? "(直连)" : dsh.Cfg.Proxy) + " language=" + dsh.Cfg.Language);
+            MarkDirty(0); MarkDirty(1);
+            sbText.Text = "设置已保存";
+
+            // 端口修改 → 立即重启服务使生效 (新端口被占用时不启动, 不杀别人的进程)
+            if (port != oldPort)
+            {
+                if (Dsh.IsPortOpen(port))
+                {
+                    ShowModernWarn(this, "设置", "端口 " + port + " 已被其他程序占用，无法重启服务。\n请换一个空闲端口（或先关闭占用该端口的程序）后再次保存。");
+                    return;
+                }
+                if (ShowModernConfirm(this, "设置", "端口已从 " + oldPort + " 改为 " + port + "。\n\n是否立即重启服务使新端口生效？\n（服务会短暂中断几秒）"))
+                {
+                    ApplyPortRestart(oldPort, port);
+                }
+                else
+                {
+                    ShowModernInfo(this, "设置", "设置已保存。\n\n端口改动将在下次启动服务时生效。");
+                }
+            }
+            else
+            {
                 ShowModernInfo(this, "设置", "设置已保存。\n\n端口/路径等改动在下次启动服务时生效。");
             }
-            else ShowModernWarn(this, "设置", "设置保存失败（配置文件可能被占用或无权限）。");
+        }
+
+        // 停止旧端口服务 → 等旧端口释放 → 用新端口启动 → 校验监听
+        void ApplyPortRestart(int oldPort, int newPort)
+        {
+            sbText.Text = "正在重启服务应用新端口…";
+            SetBusy(true);
+            var t = new Thread(delegate()
+            {
+                try
+                {
+                    dsh.StopServiceAsync();
+                    int waited = 0;
+                    while (waited < 40 && Dsh.IsPortOpen(oldPort)) { Thread.Sleep(300); waited++; }
+                    if (Dsh.IsPortOpen(oldPort)) dsh.AppendLog("[port] 旧端口 " + oldPort + " 未能在 12 秒内释放");
+                    dsh.StartServiceAsync();
+                    waited = 0;
+                    bool ok = false;
+                    while (waited < 40)
+                    {
+                        Thread.Sleep(300);
+                        if (Dsh.IsPortOpen(newPort)) { ok = true; break; }
+                        waited++;
+                    }
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        SetBusy(false);
+                        RenderOverview();
+                        if (ok)
+                        {
+                            sbText.Text = "服务已在新端口 " + newPort + " 运行";
+                            dsh.AppendLog("[port] 服务已在新端口 " + newPort + " 就绪");
+                            ShowModernInfo(this, "设置", "服务已在新端口 " + newPort + " 运行。\n打开浏览器访问 http://127.0.0.1:" + newPort);
+                        }
+                        else
+                        {
+                            sbText.Text = "新端口服务启动失败";
+                            dsh.AppendLog("[port] 新端口 " + newPort + " 服务未就绪（可能 dsh 未安装或配置错误）");
+                            ShowModernWarn(this, "设置", "新端口服务未能就绪。\n请到「日志」页查看 launcher.log 中的详细错误。");
+                        }
+                    }));
+                }
+                catch (Exception ex)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate { SetBusy(false); ShowModernWarn(this, "设置", "重启服务出错: " + ex.Message); }));
+                }
+            });
+            t.IsBackground = true;
+            t.Start();
         }
 
         void AutoFillSettings()
@@ -2826,11 +3065,16 @@ namespace DeepSeekHarness
             var t = new Thread(delegate()
             {
                 var env = dsh.DetectEnvironment();
+                string proxy = null;
+                try { proxy = dsh.ResolveProxy(); } catch { }
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     dsh.Env = env;
-                    if (!string.IsNullOrEmpty(env.NodePath)) setBoxes["home"].Text = dsh.Cfg.DshHome;
-                    if (Directory.Exists(dsh.Cfg.PluginsRoot)) setBoxes["plugins"].Text = dsh.Cfg.PluginsRoot;
+                    // 回填最新配置关键字段 (让用户看到软件当前生效的值)
+                    setBoxes["home"].Text = dsh.Cfg.DshHome;
+                    setBoxes["plugins"].Text = dsh.Cfg.PluginsRoot;
+                    setBoxes["log"].Text = dsh.Cfg.LogDir;
+                    setBoxes["proxy"].Text = string.IsNullOrEmpty(proxy) ? setBoxes["proxy"].Text.Trim() : proxy;
                     RenderEnv();
                     RenderOverview();
                     sbText.Text = "检测完成";
@@ -2865,6 +3109,218 @@ namespace DeepSeekHarness
                 ShowModernInfo(this, Lang.T("桌面快捷方式"), "已在桌面创建「DeepSeek Harness」快捷方式，双击即可启动。");
             else
                 ShowModernWarn(this, Lang.T("桌面快捷方式"), err);
+        }
+
+        // ---------- 一键导出诊断包 (粉丝遇到问题 → 打包发给开发者 → 针对性修复) ----------
+        void ExportDiag()
+        {
+            sbText.Text = "正在收集诊断信息…";
+            SetBusy(true);
+            var t = new Thread(delegate()
+            {
+                string err = "";
+                string zipPath = "";
+                try
+                {
+                    string ts = DateTime.Now.ToString("yyyyMMdd-HHmm");
+                    string tmp = Path.Combine(Path.GetTempPath(), "dsh-diag-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(tmp);
+                    // 输出位置多级兜底 (防桌面被重定向/无权限/企业策略锁写导致整包失败):
+                    // 桌面 → 我的文档 → 下载 → exe 目录 → 系统临时目录
+                    zipPath = MakeDiagZipPath(ts);
+                    if (string.IsNullOrEmpty(zipPath)) { err = "没有可写的输出位置"; return; }
+
+                    // 1. 日志文件
+                    string log1 = Path.Combine(dsh.Cfg.LogDir, "launcher.log");
+                    if (File.Exists(log1)) File.Copy(log1, Path.Combine(tmp, "launcher.log"), true);
+                    string log2 = Path.Combine(dsh.Cfg.LogDir, "dsh.log");
+                    if (!File.Exists(log2)) log2 = Path.Combine(dsh.Cfg.DshHome, "dsh.log");
+                    if (File.Exists(log2)) File.Copy(log2, Path.Combine(tmp, "dsh.log"), true);
+                    string crash = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log");
+                    if (File.Exists(crash)) File.Copy(crash, Path.Combine(tmp, "crash.log"), true);
+
+                    // 2. 配置 (代理密码脱敏)
+                    if (File.Exists(LauncherConfig.ConfigPath))
+                    {
+                        string cfgText = File.ReadAllText(LauncherConfig.ConfigPath);
+                        cfgText = Regex.Replace(cfgText, "(\"proxy\"\\s*:\\s*\"[^\"]*://[^:\"]+):([^\"@]+)@", "$1:***@");
+                        File.WriteAllText(Path.Combine(tmp, "launcher.json"), cfgText);
+                    }
+
+                    // 3. 环境报告
+                    var sb = new StringBuilder();
+                    sb.AppendLine("===== DeepSeek Harness 启动器诊断报告 =====");
+                    sb.AppendLine("生成时间: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                    sb.AppendLine("启动器版本: " + Dsh.LauncherVersion + " (WPF)");
+                    sb.AppendLine("操作系统: " + Environment.OSVersion + (Environment.Is64BitOperatingSystem ? " (x64)" : " (x86)"));
+                    sb.AppendLine(".NET: " + Environment.Version);
+                    sb.AppendLine("CPU 核心数: " + Environment.ProcessorCount);
+                    sb.AppendLine();
+                    sb.AppendLine("===== 配置 =====");
+                    sb.AppendLine("端口: " + dsh.Cfg.Port + " (监听: " + (Dsh.IsPortOpen(dsh.Cfg.Port) ? "是" : "否") + ")");
+                    sb.AppendLine("dshHome: " + dsh.Cfg.DshHome + (Directory.Exists(dsh.Cfg.DshHome) ? "" : " (目录不存在)"));
+                    sb.AppendLine("pluginsRoot: " + dsh.Cfg.PluginsRoot + (Directory.Exists(dsh.Cfg.PluginsRoot) ? "" : " (目录不存在)"));
+                    sb.AppendLine("logDir: " + dsh.Cfg.LogDir);
+                    sb.AppendLine("代理: " + (string.IsNullOrEmpty(dsh.Cfg.Proxy) ? "(未配置/直连)" : dsh.Cfg.Proxy));
+                    sb.AppendLine("npmRegistry: " + (string.IsNullOrEmpty(dsh.Cfg.NpmRegistry) ? "(默认)" : dsh.Cfg.NpmRegistry));
+                    sb.AppendLine("npmPackage: " + dsh.Cfg.NpmPackage);
+                    sb.AppendLine();
+                    sb.AppendLine("===== 环境检测 =====");
+                    var env = dsh.Env;
+                    sb.AppendLine("Node.js: " + (string.IsNullOrEmpty(env.NodePath) ? "未检测到" : env.NodeVersion + " @ " + env.NodePath));
+                    sb.AppendLine("npm: " + (string.IsNullOrEmpty(env.NpmPath) ? "未检测到" : env.NpmVersion + " @ " + env.NpmPath));
+                    sb.AppendLine("Git: " + (string.IsNullOrEmpty(env.GitPath) ? "未检测到" : CleanVer(env.GitVersion) + " @ " + env.GitPath));
+                    sb.AppendLine("dsh: " + (string.IsNullOrEmpty(env.DshPath) ? "未检测到" : env.DshVersion + " @ " + env.DshPath));
+                    sb.AppendLine();
+                    sb.AppendLine("===== 插件清单 =====");
+                    if (Directory.Exists(dsh.Cfg.PluginsRoot))
+                    {
+                        string[] dirs = Directory.GetDirectories(dsh.Cfg.PluginsRoot);
+                        if (dirs.Length == 0) sb.AppendLine("(无插件)");
+                        foreach (string d in dirs)
+                        {
+                            string name = Path.GetFileName(d);
+                            bool dis = name.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase);
+                            bool git = Directory.Exists(Path.Combine(d, ".git"));
+                            sb.AppendLine((dis ? "[已禁用] " : "[正常] ") + name + (git ? " (git)" : ""));
+                        }
+                    }
+                    else sb.AppendLine("(插件目录不存在)");
+                    sb.AppendLine();
+                    sb.AppendLine("===== 最近错误摘要 (launcher.log 关键行) =====");
+                    string tail = Dsh.ReadTail(Path.Combine(dsh.Cfg.LogDir, "launcher.log"), 800);
+                    int errCount = 0;
+                    foreach (string line in tail.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                    {
+                        if (line.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0
+                            || line.IndexOf("失败", StringComparison.OrdinalIgnoreCase) >= 0
+                            || line.IndexOf("ERR", StringComparison.OrdinalIgnoreCase) >= 0
+                            || line.IndexOf("[env]", StringComparison.OrdinalIgnoreCase) >= 0
+                            || line.IndexOf("[install]", StringComparison.OrdinalIgnoreCase) >= 0
+                            || line.IndexOf("[npm]", StringComparison.OrdinalIgnoreCase) >= 0
+                            || line.IndexOf("[git]", StringComparison.OrdinalIgnoreCase) >= 0
+                            || line.IndexOf("[port]", StringComparison.OrdinalIgnoreCase) >= 0
+                            || line.IndexOf("[settings]", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            sb.AppendLine(line);
+                            errCount++;
+                            if (errCount >= 60) break;
+                        }
+                    }
+                    if (errCount == 0) sb.AppendLine("(launcher.log 无错误记录)");
+                    File.WriteAllText(Path.Combine(tmp, "env-report.txt"), sb.ToString());
+
+                    // 4. 打包: 优先 .NET ZipArchive 直写 (不依赖子进程/中文路径/重定向桌面);
+                    //    失败则逐级换输出目录重试; 最后用 tar.exe 兜底
+                    string zipWrote = "";
+                    foreach (string dir in DiagOutputDirs())
+                    {
+                        string cand = Path.Combine(dir, "dsh-诊断包-" + ts + ".zip");
+                        try { zipWrote = WriteDiagZip(tmp, cand); } catch { zipWrote = ""; }
+                        if (!string.IsNullOrEmpty(zipWrote)) { zipPath = zipWrote; break; }
+                    }
+                    if (string.IsNullOrEmpty(zipWrote))
+                    {
+                        // tar 兜底 (文件小, tar 孤儿也可解析)
+                        foreach (string dir in DiagOutputDirs())
+                        {
+                            try
+                            {
+                                string cand = Path.Combine(dir, "dsh-诊断包-" + ts + ".zip");
+                                if (File.Exists(cand)) File.Delete(cand);
+                                string tarOk = Dsh.RunCapture("tar.exe", "-cf \"" + cand + "\" -C \"" + tmp + "\" .", 60000);
+                                if (File.Exists(cand) && new FileInfo(cand).Length > 200) { zipPath = cand; zipWrote = cand; break; }
+                                try { if (File.Exists(cand)) File.Delete(cand); } catch { }
+                            }
+                            catch { }
+                        }
+                        if (string.IsNullOrEmpty(zipWrote)) err = "打包失败（无可用输出目录）";
+                    }
+                    try { Directory.Delete(tmp, true); } catch { }
+                }
+                catch (Exception ex) { err = ex.Message; }
+                string finalZip = zipPath;
+                string finalErr = err;
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    SetBusy(false);
+                    if (Dsh.DiagTestMode)
+                    {
+                        // 自动化测试: 结果写标记文件后退出
+                        try
+                        {
+                            File.WriteAllText(Path.Combine(Path.GetTempPath(), "dsh-diag-test-result.txt"),
+                                (finalErr.Length == 0 ? "OK:" + finalZip : "FAIL:" + finalErr));
+                        }
+                        catch { }
+                        try { Environment.Exit(0); } catch { }
+                        return;
+                    }
+                    if (finalErr.Length == 0)
+                    {
+                        sbText.Text = "诊断包已导出";
+                        ShowModernInfo(this, "导出诊断包", "诊断包已导出到：\n" + finalZip + "\n\n把这个文件发给开发者，即可针对性排查问题。\n（已自动隐藏代理密码）");
+                    }
+                    else
+                    {
+                        sbText.Text = "导出失败";
+                        ShowModernWarn(this, "导出诊断包", "导出失败：" + finalErr);
+                    }
+                }));
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        // 诊断包输出目录候选: 桌面 → 我的文档 → 下载 → exe 目录 → 系统临时目录
+        static List<string> DiagOutputDirs()
+        {
+            var dirs = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Action<string> add = delegate(string p)
+            {
+                if (!string.IsNullOrEmpty(p))
+                {
+                    try { if (!Directory.Exists(p)) Directory.CreateDirectory(p); } catch { return; }
+                    if (seen.Add(p)) dirs.Add(p);
+                }
+            };
+            try { add(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)); } catch { }
+            try { add(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments)); } catch { }
+            try { add(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads")); } catch { }
+            try { add(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)); } catch { }
+            add(AppDomain.CurrentDomain.BaseDirectory);
+            add(Path.GetTempPath());
+            return dirs;
+        }
+
+        static string MakeDiagZipPath(string ts)
+        {
+            foreach (string dir in DiagOutputDirs())
+            {
+                string p = Path.Combine(dir, "dsh-诊断包-" + ts + ".zip");
+                try { using (var fs = new FileStream(p, FileMode.Create)) { fs.WriteByte(0); } File.Delete(p); return p; }
+                catch { }
+            }
+            return "";
+        }
+
+        // .NET ZipArchive 直写打包 (不依赖 PowerShell 子进程; 顺带验证输出目录可写)
+        static string WriteDiagZip(string tmpDir, string zipPath)
+        {
+            try { if (File.Exists(zipPath)) File.Delete(zipPath); } catch { }
+            using (var fs = new FileStream(zipPath, FileMode.CreateNew))
+            using (var zip = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                foreach (string f in Directory.GetFiles(tmpDir))
+                {
+                    var e = zip.CreateEntry(Path.GetFileName(f), System.IO.Compression.CompressionLevel.Optimal);
+                    using (var es = e.Open())
+                    using (var src = File.OpenRead(f))
+                        src.CopyTo(es);
+                }
+            }
+            return File.Exists(zipPath) ? zipPath : "";
         }
 
         // ---------- 现代化质感对话框 (深浅模式完全自适应，彻底淘汰原生 MessageBox) ----------
@@ -3076,7 +3532,7 @@ namespace DeepSeekHarness
                 // 头部小标题
                 var head = new Grid { Margin = new Thickness(10, 3, 10, 4) };
                 var headTitle = new TextBlock { Text = "DeepSeek Harness", Foreground = Palette.Brush(Palette.Text), FontSize = 11, FontWeight = FontWeights.Bold };
-                var headVer = new TextBlock { Text = "v1.0.8", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 9, HorizontalAlignment = HorizontalAlignment.Right, FontWeight = FontWeights.SemiBold };
+                var headVer = new TextBlock { Text = "v" + Dsh.LauncherVersion, Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 9, HorizontalAlignment = HorizontalAlignment.Right, FontWeight = FontWeights.SemiBold };
                 head.Children.Add(headTitle);
                 head.Children.Add(headVer);
                 stack.Children.Add(head);
