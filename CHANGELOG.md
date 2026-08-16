@@ -27,7 +27,14 @@
 
 ### 🐛 修复
 
-- GitHub release 下载可能拿到 CDN 缓存的旧文件——发布改用版本化文件名（DeepSeekHarness-v1.0.8.exe），上传后哈希核验
+- **一键安装 Node.js 必失败**：下载地址解析用了"version 与 lts 字段必须相邻"的严格正则，而官方 index.json 两字段之间隔着十几个字段——**无论网络好坏都匹配失败**，报「无法获取 Node.js 下载地址」。改为宽松匹配 + npmmirror 优先
+- **SmartHttp 空代理落到系统默认代理**：未配置代理时 HttpWebRequest 走 IE 系统代理，系统代理指向失效地址时全部请求挂死。改为空代理 = 显式直连
+- **DownloadFile 同样问题**：WebClient 默认走系统代理，现在代理/直连双通道自动切换
+- **git 死代理污染**：配置的代理失效时，git 操作先带死代理失败，转直连重试，再走 GitHub 加速镜像
+- **代理误判**：TestProxy 现在校验真实响应内容（api.github.com/zen 返回 "zen"），防止 curl 报错输出被误判为代理可用
+- **npm 安装超时收紧**：单次尝试 10 分钟 → 5 分钟，避免慢网死等 50 分钟
+- **GitHub release 下载可能拿到 CDN 缓存的旧文件**：发布改用版本化文件名（DeepSeekHarness-v1.0.8.exe），上传后哈希核验
+- **隐藏测试参数 --sandbox**：隔离测试模式（独立 Mutex、检测只信 PATH、禁止真实安装/PATH 写入），正常用户无感知
 
 ## v1.0.7 (2026-08-16)
 
