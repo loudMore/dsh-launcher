@@ -1316,6 +1316,17 @@ namespace DeepSeekHarness
             string lastOut = null;
             int total = attempts.Count;
             int shown = 0;
+            // 老版本 npm (<6) 不识别 --no-audit/--fetch-timeout 等新 flag, 先探测版本再决定附加参数
+            bool legacyNpm = true;
+            string npmVer = RunCapture("cmd.exe", "/c npm --version", 15000);
+            if (npmVer != null)
+            {
+                Match mv = Regex.Match(npmVer.Trim(), @"^(\d+)");
+                double v;
+                if (mv.Success && double.TryParse(mv.Groups[1].Value, out v)) legacyNpm = v < 6;
+            }
+            string flags = legacyNpm ? "" : " --no-audit --no-fund --fetch-timeout=60000 --fetch-retries=1";
+            Proc.DLog("npm", "npm ver=" + (npmVer == null ? "?" : npmVer.Trim()) + " legacyNpm=" + legacyNpm);
             for (int i = 0; i < attempts.Count; i++)
             {
                 string reg = attempts[i].Key;
@@ -1323,7 +1334,7 @@ namespace DeepSeekHarness
                 string key = (reg ?? "<default>") + "|" + (clearProxy ? "noproxy" : "proxy");
                 if (!seen.Add(key)) { total--; continue; }
                 shown++;
-                string args = "install -g " + pkg + " --no-audit --no-fund --fetch-timeout=60000 --fetch-retries=1";
+                string args = "install -g " + pkg + flags;
                 if (reg != null) args += " --registry " + reg;
                 Proc.DLog("npm", "attempt " + shown + "/" + total + ": " + args + (clearProxy ? " (clear-proxy)" : ""));
                 Report("正在安装 dsh（尝试 " + shown + "/" + total + "，源: " + (reg == null ? "默认" : "镜像") + "）…");
