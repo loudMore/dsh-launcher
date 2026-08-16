@@ -233,7 +233,8 @@ namespace DeepSeekHarness
         {
             try
             {
-                File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launcher-debug.log"),
+                // 调试日志写入用户数据目录 (exe 在桌面/只读目录时也不污染桌面)
+                File.AppendAllText(Path.Combine(LauncherConfig.DataDir, "launcher-debug.log"),
                     DateTime.Now.ToString("HH:mm:ss.fff") + " [" + tag + "] " + msg + "\r\n");
             }
             catch { }
@@ -267,16 +268,49 @@ namespace DeepSeekHarness
         public string GitPath = "";
         public string Proxy = "";
 
+        // 用户数据目录 (Win10/11 标准约定): %LocalAppData%\DeepSeekHarness
+        // 无论 exe 放在哪 (桌面/Program Files/U盘), 日志/插件/配置都归位到用户数据目录,
+        // 不会污染桌面、不随 exe 移动、不需要管理员权限。
+        public static string DataDir
+        {
+            get
+            {
+                try
+                {
+                    string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DeepSeekHarness");
+                    Directory.CreateDirectory(d);
+                    return d;
+                }
+                catch { return AppDomain.CurrentDomain.BaseDirectory; }
+            }
+        }
+
+        // 配置文件: 一律在用户数据目录 (老版本 exe 目录旁的 launcher.json 由 Load() 兼容读取)
         public static string ConfigPath
         {
-            get { return Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launcher.json"); }
+            get { return Path.Combine(DataDir, "launcher.json"); }
         }
 
         public void ApplyDefaults()
         {
             string exeDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\');
-            if (string.IsNullOrEmpty(LogDir)) LogDir = exeDir;
-            if (string.IsNullOrEmpty(PluginsRoot)) PluginsRoot = Path.Combine(exeDir, "plugins");
+            string dataDir = DataDir;
+            // 默认数据目录 = 用户数据目录 (Win10/11 标准约定, exe 在桌面/只读目录也不污染桌面)
+            // 兼容升级: exe 目录旁已有 launcher.json/plugins 时沿用旧目录 (老用户数据不搬家),
+            // 但 exe 在桌面/系统目录时绝不用 exe 目录 (桌面会被 OneDrive 同步/只读, 正是历史 bug 场景)
+            bool exeDirBad = IsBadExeDir(exeDir);
+            if (string.IsNullOrEmpty(LogDir))
+            {
+                LogDir = (!exeDirBad && File.Exists(Path.Combine(exeDir, "launcher.json")))
+                    ? exeDir
+                    : dataDir;
+            }
+            if (string.IsNullOrEmpty(PluginsRoot))
+            {
+                PluginsRoot = (!exeDirBad && Directory.Exists(Path.Combine(exeDir, "plugins")))
+                    ? Path.Combine(exeDir, "plugins")
+                    : Path.Combine(dataDir, "plugins");
+            }
             if (string.IsNullOrEmpty(DshHome))
             {
                 string env = Environment.GetEnvironmentVariable("DSH_HOME");
@@ -287,9 +321,28 @@ namespace DeepSeekHarness
                     {
                         DshHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".dsh");
                     }
-                    catch { DshHome = Path.Combine(exeDir, "dsh-home"); }
+                    catch { DshHome = Path.Combine(dataDir, "dsh-home"); }
                 }
             }
+        }
+
+        // exe 目录是否不适合放数据: 桌面 (OneDrive/整洁性) 或 Program Files 等系统目录 (只读)
+        static bool IsBadExeDir(string dir)
+        {
+            try
+            {
+                string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory).TrimEnd('\\');
+                string pf = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles).TrimEnd('\\');
+                string pf86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86).TrimEnd('\\');
+                if (dir.Equals(desktop, StringComparison.OrdinalIgnoreCase)) return true;
+                if (dir.Equals(pf, StringComparison.OrdinalIgnoreCase)) return true;
+                if (dir.Equals(pf86, StringComparison.OrdinalIgnoreCase)) return true;
+                // 系统目录 (Program Files 子目录) 一般不可写
+                if (pf.Length > 0 && dir.StartsWith(pf + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+                if (pf86.Length > 0 && dir.StartsWith(pf86 + "\\", StringComparison.OrdinalIgnoreCase)) return true;
+            }
+            catch { }
+            return false;
         }
 
         public static LauncherConfig Load()
@@ -297,10 +350,17 @@ namespace DeepSeekHarness
             var cfg = new LauncherConfig();
             try
             {
-                if (File.Exists(ConfigPath))
+                string cfgPath = ConfigPath;
+                if (!File.Exists(cfgPath))
+                {
+                    // 兼容旧版: 配置在 exe 目录 (老用户升级后首启, 读取旧配置并沿用其路径)
+                    string old = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launcher.json");
+                    if (File.Exists(old)) cfgPath = old;
+                }
+                if (File.Exists(cfgPath))
                 {
                     var ser = new JavaScriptSerializer();
-                    var d = ser.DeserializeObject(File.ReadAllText(ConfigPath)) as Dictionary<string, object>;
+                    var d = ser.DeserializeObject(File.ReadAllText(cfgPath)) as Dictionary<string, object>;
                     if (d != null)
                     {
                         cfg.Port = IntOf(d, "port", cfg.Port);
@@ -574,7 +634,7 @@ namespace DeepSeekHarness
         // 隐藏参数 --diag-test: 启动后自动导出诊断包并退出 (仅用于自动化测试)
         public static bool DiagTestMode = false;
         // 启动器当前版本 (唯一真相源; 所有 UI 显示与升级判断都从这里读, 防止多处硬编码漂移)
-        public const string LauncherVersion = "1.0.8";
+        public const string LauncherVersion = "1.0.9";
 
         public LauncherConfig Cfg;
         public EnvInfo Env = new EnvInfo();
@@ -759,14 +819,14 @@ namespace DeepSeekHarness
             }
             catch (Exception ex)
             {
-                // 主路径失败时写错误诊断 (便于定位), 并尝试 exe 目录兜底
+                // 主路径失败时写错误诊断 (便于定位), 并尝试数据目录兜底 (绝不写 exe 目录, 防桌面污染)
                 try
                 {
-                    File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launcher-append-error.log"),
+                    File.AppendAllText(Path.Combine(LauncherConfig.DataDir, "launcher-append-error.log"),
                         DateTime.Now.ToString("HH:mm:ss") + "  append failed (" + (Cfg == null ? "Cfg=null" : "logDir='" + Cfg.LogDir + "'") + "): " + ex + "\r\n");
                 }
                 catch { }
-                try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launcher.log"), text); } catch { }
+                try { File.AppendAllText(Path.Combine(LauncherConfig.DataDir, "launcher.log"), text); } catch { }
             }
             if (OnLog != null) { try { OnLog(line); } catch { } }
         }
@@ -1306,8 +1366,32 @@ namespace DeepSeekHarness
             catch { }
         }
 
+        // 安全校验: 端口占用进程是不是 dsh 服务 (防止误杀用户其他程序)
+        // 通过进程命令行包含 dsh + web 关键字判定 (dsh 服务启动命令: cmd /c dsh web --host 127.0.0.1 --port X)
+        // 读不到命令行/不匹配 → 一律视为非 dsh, 不杀 (Win10/11 用 powershell Get-CimInstance, 零额外依赖)
+        static bool IsDshProcess(int pid)
+        {
+            try
+            {
+                string outp = RunCapture("powershell.exe",
+                    "-NoProfile -Command \"(Get-CimInstance Win32_Process -Filter 'ProcessId=" + pid + "').CommandLine\"",
+                    10000);
+                if (string.IsNullOrEmpty(outp)) return false;
+                return outp.IndexOf("dsh", StringComparison.OrdinalIgnoreCase) >= 0
+                    && outp.IndexOf("web", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
         public void OpenBrowser()
         {
+            // 先探测服务是否就绪: 未就绪时提示, 避免打开空白/404 页面让用户困惑
+            if (!IsPortOpen(Cfg.Port))
+            {
+                Report("服务未运行，无法打开页面");
+                AppendLog("[web] open skipped: port " + Cfg.Port + " not listening");
+                return;
+            }
             try { Process.Start(string.Format("http://127.0.0.1:{0}", Cfg.Port)); } catch { }
         }
 
@@ -1322,8 +1406,18 @@ namespace DeepSeekHarness
                     {
                         Report("检测到旧服务，正在重启…");
                         int pid = FindPidByPort(Cfg.Port);
-                        if (pid > 0) KillProcessTree(pid);
-                        for (int i = 0; i < 20 && IsPortOpen(Cfg.Port); i++) Thread.Sleep(300);
+                        if (pid > 0 && IsDshProcess(pid))
+                        {
+                            KillProcessTree(pid);
+                            for (int i = 0; i < 20 && IsPortOpen(Cfg.Port); i++) Thread.Sleep(300);
+                        }
+                        else if (pid > 0)
+                        {
+                            // 端口被非 dsh 进程占用: 不杀别人, 提示用户
+                            Report("端口 " + Cfg.Port + " 被其他程序占用，未执行重启");
+                            AppendLog("[port] " + Cfg.Port + " occupied by non-dsh pid=" + pid + ", skip kill");
+                            return;
+                        }
                     }
                     else
                     {
@@ -1396,7 +1490,13 @@ namespace DeepSeekHarness
                 else
                 {
                     int pid = FindPidByPort(Cfg.Port);
-                    if (pid > 0) KillProcessTree(pid);
+                    if (pid > 0 && IsDshProcess(pid)) KillProcessTree(pid);
+                    else if (pid > 0)
+                    {
+                        AppendLog("[port] stop skipped: " + Cfg.Port + " occupied by non-dsh pid=" + pid);
+                        Report("端口被其他程序占用，未执行停止");
+                        return;
+                    }
                 }
                 for (int i = 0; i < 20 && IsPortOpen(Cfg.Port); i++) Thread.Sleep(300);
                 Report(IsPortOpen(Cfg.Port) ? "服务未能停止" : "服务已停止");
@@ -1418,7 +1518,13 @@ namespace DeepSeekHarness
                 else
                 {
                     int pid = FindPidByPort(Cfg.Port);
-                    if (pid > 0) KillProcessTree(pid);
+                    if (pid > 0 && IsDshProcess(pid)) KillProcessTree(pid);
+                    else if (pid > 0)
+                    {
+                        AppendLog("[port] restart skipped: " + Cfg.Port + " occupied by non-dsh pid=" + pid);
+                        Report("端口被其他程序占用，未执行重启");
+                        return;
+                    }
                 }
                 for (int i = 0; i < 20 && IsPortOpen(Cfg.Port); i++) Thread.Sleep(300);
                 Report("正在启动服务…");
@@ -2487,9 +2593,33 @@ namespace DeepSeekHarness
         // 桌面快捷方式 (WScript.Shell 反射创建)
         public string CreateDesktopShortcut()
         {
+            return WriteShortcut(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "DeepSeek Harness.lnk"));
+        }
+
+        // 启动时自动同步桌面快捷方式 → 指向当前运行的 exe (自更新后双击快捷方式 = 最新版, 不再停在旧版)
+        // 幂等: 目标已指向当前 exe 则不动 (避免每次启动重写快捷方式)
+        public void SyncDesktopShortcut()
+        {
             try
             {
                 string lnk = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "DeepSeek Harness.lnk");
+                if (!File.Exists(lnk)) return;   // 没有快捷方式就不管 (用户可能不需要)
+                Type t = Type.GetTypeFromProgID("WScript.Shell");
+                object shell = Activator.CreateInstance(t);
+                object shortcut = t.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { lnk });
+                Type st = shortcut.GetType();
+                string cur = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                string old = Convert.ToString(st.InvokeMember("TargetPath", System.Reflection.BindingFlags.GetProperty, null, shortcut, null));
+                if (string.Equals(old, cur, StringComparison.OrdinalIgnoreCase)) return;   // 已指向当前 exe
+                WriteShortcut(lnk);
+            }
+            catch { }
+        }
+
+        static string WriteShortcut(string lnk)
+        {
+            try
+            {
                 Type t = Type.GetTypeFromProgID("WScript.Shell");
                 object shell = Activator.CreateInstance(t);
                 object shortcut = t.InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, new object[] { lnk });
@@ -2514,11 +2644,14 @@ namespace DeepSeekHarness
         // ---------- 插件操作 ----------
         public string InstallPluginFromUrl(string url)
         {
-            // 注入防护: 拒绝 shell 元字符
+            // 注入防护: 只拒绝 cmd 元字符 (RunGit 用 ProcessStartInfo 直接传参, 不经过 shell 解析,
+            // 但 URL 最终进 git 参数, 保守起见拒绝引号/重定向/管道等; % 与 $ 是 URL/仓库名的合法字符, 放行)
             if (url.IndexOf('"') >= 0 || url.IndexOf('&') >= 0 || url.IndexOf('|') >= 0
                 || url.IndexOf(';') >= 0 || url.IndexOf('>') >= 0 || url.IndexOf('<') >= 0
-                || url.IndexOf('`') >= 0 || url.IndexOf('$') >= 0 || url.IndexOf('%') >= 0)
+                || url.IndexOf('`') >= 0 || url.IndexOf('\'') >= 0)
                 return "地址格式不正确，请输入完整的 git 仓库地址。";
+            if (url.IndexOf("://") < 0 && !url.StartsWith("git@", StringComparison.Ordinal))
+                return "地址格式不正确，请输入完整的 git 仓库地址（如 https://github.com/xxx/yyy）。";
             string name = Path.GetFileName(url.TrimEnd('/'));
             if (name.EndsWith(".git")) name = name.Substring(0, name.Length - 4);
             string target = Path.Combine(Cfg.PluginsRoot, name);
@@ -2535,6 +2668,11 @@ namespace DeepSeekHarness
 
         public string InstallNpmPlugin(string pkg)
         {
+            // npm 包名白名单: 只允许合法包名字符 (npm 规范: 小写字母/数字/._- 与 scoped @scope/name),
+            // 防注入 (此路径走 cmd /c, 必须严格校验)
+            if (string.IsNullOrEmpty(pkg)
+                || !Regex.IsMatch(pkg, "^(@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"))
+                return "包名格式不正确，请输入合法的 npm 包名（如 plugin-name 或 @scope/plugin-name）。";
             Report("正在安装插件 " + pkg + " …");
             string r = RunCapture("cmd.exe", "/c npm install -g " + pkg, 300000);
             AppendLog("[plugin] npm install -g " + pkg + (r == null ? " (超时/失败)" : " 完成"));
