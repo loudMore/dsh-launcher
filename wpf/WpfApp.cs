@@ -118,8 +118,12 @@ namespace DeepSeekHarness
         static void Main()
         {
             // 单实例: 已在运行则发信号让旧窗口弹出, 自己退出
+            // 隐藏参数 --sandbox: 换独立 Mutex 名, 允许与生产实例并存 (仅供隔离测试)
+            bool sandbox = false;
+            try { foreach (string a in Environment.GetCommandLineArgs()) if (a == "--sandbox") sandbox = true; } catch { }
             bool createdNew;
-            singletonMutex = new Mutex(true, "DeepSeekHarness.Launcher.WPF.v1", out createdNew);
+            singletonMutex = new Mutex(true, "DeepSeekHarness.Launcher.WPF.v1" + (sandbox ? ".sandbox" : ""), out createdNew);
+            if (sandbox) Dsh.SandboxMode = true;
             if (!createdNew)
             {
                 try { File.WriteAllText(Proc.ReopenFlagPath(), "1"); } catch { }
@@ -1904,6 +1908,13 @@ namespace DeepSeekHarness
 
         void RunInstall()
         {
+            // 沙盒模式(隔离测试): 硬禁止真实安装, 防止测试污染用户环境
+            if (Dsh.SandboxMode)
+            {
+                sbText.Text = "沙盒模式不执行安装";
+                ShowModernWarn(this, "一键安装", "当前为沙盒测试模式（--sandbox），不执行真实安装。\n正常使用时不会出现此提示。");
+                return;
+            }
             // 支持选择是否自定义安装路径
             string defaultPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "node");
             string customPath = Prompt(
@@ -2376,12 +2387,18 @@ namespace DeepSeekHarness
 
         void UpgradeDsh()
         {
+            if (Dsh.SandboxMode)
+            {
+                sbText.Text = "沙盒模式不执行升级";
+                ShowModernWarn(this, "升级 dsh", "当前为沙盒测试模式（--sandbox），不执行真实升级。");
+                return;
+            }
             sbText.Text = "正在升级 dsh…";
             SetBusy(true);
             var t = new Thread(delegate()
             {
                 string detail;
-                string r = dsh.NpmInstallGlobal(dsh.Cfg.NpmPackage, 600000, out detail);
+                string r = dsh.NpmInstallGlobal(dsh.Cfg.NpmPackage, 300000, out detail);
                 var env = dsh.DetectEnvironment();
                 dsh.Env = env;
                 // 重新检查更新状态, 让"立即升级 dsh"按钮立即变为"✓ 已是最新"
