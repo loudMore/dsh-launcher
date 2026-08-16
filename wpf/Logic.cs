@@ -444,6 +444,17 @@ namespace DeepSeekHarness
     {
         public static byte[] Get(string url, string proxy, int timeoutMs)
         {
+            // 双通道: 配置了代理先走代理, 失败自动直连重试 (兼容有/无代理用户)
+            if (!string.IsNullOrEmpty(proxy))
+            {
+                byte[] b = GetInner(url, proxy, timeoutMs);
+                if (b != null) return b;
+            }
+            return GetInner(url, null, timeoutMs);
+        }
+
+        static byte[] GetInner(string url, string proxy, int timeoutMs)
+        {
             try
             {
                 var req = (HttpWebRequest)WebRequest.Create(url);
@@ -451,7 +462,8 @@ namespace DeepSeekHarness
                 req.Accept = "*/*";
                 req.Timeout = timeoutMs;
                 req.ReadWriteTimeout = timeoutMs;
-                if (!string.IsNullOrEmpty(proxy)) req.Proxy = new WebProxy(proxy);
+                // 显式指定代理: 空 = 直连 (绝不能落到系统默认代理, 失效的系统代理会让所有请求挂死)
+                req.Proxy = string.IsNullOrEmpty(proxy) ? null : new WebProxy(proxy);
                 using (var resp = (HttpWebResponse)req.GetResponse())
                 using (var s = resp.GetResponseStream())
                 using (var ms = new MemoryStream())
@@ -554,6 +566,10 @@ namespace DeepSeekHarness
     // ============================================================
     class Dsh
     {
+        // 隐藏参数 --sandbox 注入: 环境检测只信进程 PATH (跳过注册表/常见目录深度扫描),
+        // 配合受限 PATH 启动可完整模拟"全新用户"的检测结果 (仅用于隔离测试)
+        public static bool SandboxMode = false;
+
         public LauncherConfig Cfg;
         public EnvInfo Env = new EnvInfo();
         public UpdateInfo Update = new UpdateInfo();
@@ -682,25 +698,35 @@ namespace DeepSeekHarness
                 catch { }
             }
             // 网络类 git 操作自动附加代理参数 (git 不读系统代理, 需要显式 -c http.proxy)
+            string proxyArgs = "";
             string proxy = detectedProxy;
             if (string.IsNullOrEmpty(proxy) && !string.IsNullOrEmpty(Cfg.Proxy)) proxy = Cfg.Proxy;
             if (string.IsNullOrEmpty(proxy) && proxyChecked) proxy = detectedProxy;
             if (!string.IsNullOrEmpty(proxy))
             {
-                args = "-c http.proxy=\"" + proxy + "\" -c https.proxy=\"" + proxy + "\" " + args;
+                proxyArgs = "-c http.proxy=\"" + proxy + "\" -c https.proxy=\"" + proxy + "\" ";
             }
             string oldPath = Environment.GetEnvironmentVariable("Path");
             try { Environment.SetEnvironmentVariable("Path", prefix + oldPath); } catch { }
-            string r = RunCapture(git, args, timeoutMs);
-            // 网络类操作失败时, 自动用 GitHub 加速镜像重试 (一次 -c insteadOf 映射, 不改用户配置)
+            string r = RunCapture(git, proxyArgs + args, timeoutMs);
+            // 网络类操作失败时的自适应链: ①代理失败→转直连 ②直连失败→GitHub 加速镜像
+            // (一次 -c insteadOf 映射, 不改用户配置; 兼容开了/没开代理的两种用户)
             if (r == null && IsGitNetOp(args))
             {
-                foreach (string mirror in GitProxyMirrors)
+                if (proxyArgs.Length > 0)
                 {
-                    string mArgs = "-c url.\"" + mirror + "\".insteadOf=\"https://github.com/\" " + args;
-                    AppendLog("[git] 直连失败, 尝试镜像 " + mirror);
-                    string m = RunCapture(git, mArgs, timeoutMs);
-                    if (m != null) { AppendLog("[git] 镜像 " + mirror + " 成功"); r = m; break; }
+                    AppendLog("[git] 代理 " + proxy + " 失败, 转直连重试");
+                    r = RunCapture(git, args, timeoutMs);
+                }
+                if (r == null)
+                {
+                    foreach (string mirror in GitProxyMirrors)
+                    {
+                        string mArgs = "-c url.\"" + mirror + "\".insteadOf=\"https://github.com/\" " + args;
+                        AppendLog("[git] 直连失败, 尝试镜像 " + mirror);
+                        string m = RunCapture(git, mArgs, timeoutMs);
+                        if (m != null) { AppendLog("[git] 镜像 " + mirror + " 成功"); r = m; break; }
+                    }
                 }
             }
             try { Environment.SetEnvironmentVariable("Path", oldPath); } catch { }
@@ -757,8 +783,11 @@ namespace DeepSeekHarness
                 }
             };
             add(Environment.GetEnvironmentVariable("Path"));
-            try { using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Environment")) add(k.GetValue("Path") as string); } catch { }
-            try { using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")) add(k.GetValue("Path") as string); } catch { }
+            if (!SandboxMode)
+            {
+                try { using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey("Environment")) add(k.GetValue("Path") as string); } catch { }
+                try { using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")) add(k.GetValue("Path") as string); } catch { }
+            }
             return dirs;
         }
 
@@ -791,24 +820,27 @@ namespace DeepSeekHarness
                 }
             }
             var cands = new List<string>();
-            string nvmSymlink = Environment.GetEnvironmentVariable("NVM_SYMLINK");
-            if (!string.IsNullOrEmpty(nvmSymlink)) cands.Add(Path.Combine(nvmSymlink, "node.exe"));
-            cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));
-            cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "nodejs", "node.exe"));
-            cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "node", "node.exe"));
-            string nvmHome = Environment.GetEnvironmentVariable("NVM_HOME");
-            if (string.IsNullOrEmpty(nvmHome))
-                nvmHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "nvm");
-            if (Directory.Exists(nvmHome))
+            if (!SandboxMode)
             {
-                var vers = new List<string>();
-                try { foreach (string d in Directory.GetDirectories(nvmHome)) if (Path.GetFileName(d).StartsWith("v", StringComparison.OrdinalIgnoreCase)) vers.Add(d); } catch { }
-                vers.Sort();
-                vers.Reverse();
-                foreach (string v in vers) cands.Add(Path.Combine(v, "node.exe"));
+                string nvmSymlink = Environment.GetEnvironmentVariable("NVM_SYMLINK");
+                if (!string.IsNullOrEmpty(nvmSymlink)) cands.Add(Path.Combine(nvmSymlink, "node.exe"));
+                cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"));
+                cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "nodejs", "node.exe"));
+                cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "node", "node.exe"));
+                string nvmHome = Environment.GetEnvironmentVariable("NVM_HOME");
+                if (string.IsNullOrEmpty(nvmHome))
+                    nvmHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "nvm");
+                if (Directory.Exists(nvmHome))
+                {
+                    var vers = new List<string>();
+                    try { foreach (string d in Directory.GetDirectories(nvmHome)) if (Path.GetFileName(d).StartsWith("v", StringComparison.OrdinalIgnoreCase)) vers.Add(d); } catch { }
+                    vers.Sort();
+                    vers.Reverse();
+                    foreach (string v in vers) cands.Add(Path.Combine(v, "node.exe"));
+                }
+                cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop", "apps", "nodejs", "current", "node.exe"));
+                cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "chocolatey", "bin", "node.exe"));
             }
-            cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop", "apps", "nodejs", "current", "node.exe"));
-            cands.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "chocolatey", "bin", "node.exe"));
             foreach (string c in cands)
             {
                 try { if (File.Exists(c)) return c; }
@@ -837,6 +869,7 @@ namespace DeepSeekHarness
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "chocolatey", "bin", "git.exe"),
                 Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "scoop", "apps", "git", "current", "cmd", "git.exe")
             };
+            if (SandboxMode) return "";
             foreach (string c in cands)
             {
                 try { if (File.Exists(c)) return c; }
@@ -922,6 +955,8 @@ namespace DeepSeekHarness
                             return File.Exists(p + ".cmd") ? p + ".cmd" : p + ".exe";
                     }
                 }
+
+                if (SandboxMode) return "";   // 沙盒模式: 深度扫描全部跳过, 仅 where 结果
 
                 // 3. npm 全局目录: npm prefix -g → node_modules/.bin/dsh.cmd
                 string npmGlobal = FindNpmGlobalDir();
@@ -1050,7 +1085,9 @@ namespace DeepSeekHarness
         {
             if (string.IsNullOrEmpty(p)) return false;
             if (p.IndexOf("://") < 0) p = "http://" + p;
-            return RunCapture("curl.exe", "-x " + p + " -s -m 3 https://api.github.com/zen", 6000) != null;
+            // 必须返回真实内容 (api.github.com/zen 返回 "zen" 文本), 防止 curl 报错输出被误判为可用
+            string r = RunCapture("curl.exe", "-x " + p + " -s -m 3 https://api.github.com/zen", 6000);
+            return r != null && r.IndexOf("zen", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         public string ResolveProxy()
@@ -2583,24 +2620,33 @@ namespace DeepSeekHarness
         // ---------- 一键安装 (Node.js + dsh) ----------
         string GetLatestLtsUrl()
         {
+            // 国内优先: npmmirror → 华为云 → nodejs.org
             string[] indexUrls = {
-                "https://nodejs.org/dist/index.json",
                 "https://npmmirror.com/mirrors/node/index.json",
-                HuaweiNodeMirror + "index.json"
+                HuaweiNodeMirror + "index.json",
+                "https://nodejs.org/dist/index.json"
             };
             string[] distBases = {
-                "https://nodejs.org/dist/",
                 "https://npmmirror.com/mirrors/node/",
-                HuaweiNodeMirror
+                HuaweiNodeMirror,
+                "https://nodejs.org/dist/"
             };
             string arch = Environment.Is64BitOperatingSystem ? "x64" : "x86";
             for (int i = 0; i < indexUrls.Length; i++)
             {
                 string json = null;
                 try { json = SmartHttp.Decode(SmartHttp.Get(indexUrls[i], Cfg.Proxy, 20000)); } catch { }
-                if (json == null) json = RunCapture("curl.exe", "-s -m 30 " + indexUrls[i], 45000);
+                if (json == null)
+                {
+                    // curl 兜底: 跟随重定向, 无代理时显式直连 (防环境 HTTP_PROXY 残留)
+                    string curlArgs = "-s -L -m 20";
+                    if (string.IsNullOrEmpty(Cfg.Proxy)) curlArgs += " --noproxy \"*\"";
+                    else curlArgs += " -x " + Cfg.Proxy;
+                    json = RunCapture("curl.exe", curlArgs + " \"" + indexUrls[i] + "\"", 35000);
+                }
                 if (json == null) continue;
-                Match m = Regex.Match(json, "\"version\":\"(v\\d+\\.\\d+\\.\\d+)\",\"lts\":\"[A-Za-z]+\"");
+                // 宽松匹配: version 与 lts 之间允许任意字段 (官方 index.json 两字段不相邻)
+                Match m = Regex.Match(json, "\"version\":\"(v\\d+\\.\\d+\\.\\d+)\"[^}]*?\"lts\":\"[A-Za-z]+\"");
                 if (!m.Success) continue;
                 string ver = m.Groups[1].Value;
                 return distBases[i] + ver + "/node-" + ver + "-win-" + arch + ".zip";
@@ -2610,21 +2656,50 @@ namespace DeepSeekHarness
 
         bool DownloadFile(string url, string dest)
         {
+            // 双通道: 有可用代理先走代理, 失败立即直连重试 (兼容开了/没开代理的两种用户)
+            try
+            {
+                WebProxy wp = null;
+                try { wp = CurrentWebProxy(); } catch { }
+                if (wp != null)
+                {
+                    using (var wc = new WebClient())
+                    {
+                        wc.Proxy = wp;
+                        wc.DownloadFile(url, dest);
+                    }
+                    return true;
+                }
+            }
+            catch
+            {
+                try { if (File.Exists(dest)) File.Delete(dest); } catch { }
+                AppendLog("[download] 代理下载失败, 转直连: " + url);
+            }
             try
             {
                 using (var wc = new WebClient())
                 {
-                    var wp = CurrentWebProxy();
-                    if (wp != null) wc.Proxy = wp;
+                    wc.Proxy = null;   // 显式直连
                     wc.DownloadFile(url, dest);
                 }
                 return true;
             }
-            catch { return false; }
+            catch
+            {
+                try { if (File.Exists(dest)) File.Delete(dest); } catch { }
+                return false;
+            }
         }
 
-        static void AddUserPath(string dir)
+        void AddUserPath(string dir)
         {
+            // 沙盒模式(隔离测试): 绝不写真实用户环境, 只记日志
+            if (SandboxMode)
+            {
+                AppendLog("[sandbox] skip AddUserPath: " + dir + " (sandbox mode)");
+                return;
+            }
             try
             {
                 string userPath = Environment.GetEnvironmentVariable("Path", EnvironmentVariableTarget.User) ?? "";
@@ -2798,7 +2873,7 @@ namespace DeepSeekHarness
 
                 Report("正在安装 dsh（npm install -g " + Cfg.NpmPackage + "）…");
                 string detail;
-                string r = NpmInstallGlobal(Cfg.NpmPackage, 600000, out detail);
+                string r = NpmInstallGlobal(Cfg.NpmPackage, 300000, out detail);
                 if (r == null)
                 {
                     error = "npm 安装 dsh 失败：\n" + detail
