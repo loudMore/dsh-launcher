@@ -39,6 +39,7 @@ namespace DeepSeekHarness
         public static Color TextFaint { get { return IsDark ? Color.FromRgb(90, 104, 141) : Color.FromRgb(100, 116, 139); } }
         public static Color Success { get { return IsDark ? Color.FromRgb(34, 197, 94) : Color.FromRgb(5, 150, 105); } }
         public static Color Warn { get { return IsDark ? Color.FromRgb(245, 158, 11) : Color.FromRgb(217, 119, 6); } }
+        public static Color WarnLight { get { return IsDark ? Color.FromRgb(255, 178, 44) : Color.FromRgb(245, 158, 11); } }
         public static Color Error { get { return IsDark ? Color.FromRgb(239, 68, 68) : Color.FromRgb(220, 38, 38); } }
         public static Color Border { get { return IsDark ? Color.FromArgb(28, 255, 255, 255) : Color.FromArgb(45, 0, 0, 0); } }
         public static Color BorderSoft { get { return IsDark ? Color.FromArgb(16, 255, 255, 255) : Color.FromArgb(28, 0, 0, 0); } }
@@ -257,7 +258,7 @@ namespace DeepSeekHarness
             stack.Children.Add(logoEl);
             stack.Children.Add(new TextBlock { Text = "DeepSeek Harness Launcher", Foreground = Palette.Brush(Palette.Text), FontSize = 19, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 16, 0, 0) });
             stack.Children.Add(new TextBlock { Text = Lang.T("DSH 启动器 · WPF 旗舰版"), Foreground = Palette.Brush(Palette.TextDim), FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0) });
-            stack.Children.Add(new TextBlock { Text = "v1.0.7 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 0) });
+            stack.Children.Add(new TextBlock { Text = "v1.0.8 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 0) });
             // 加载动画条
             var bar = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Palette.Brush(Palette.BgInput), Margin = new Thickness(30, 16, 30, 0) };
             var fill = new Border { Width = 60, CornerRadius = new CornerRadius(2), Background = Palette.Brush(Palette.Blue), HorizontalAlignment = HorizontalAlignment.Left };
@@ -410,6 +411,11 @@ namespace DeepSeekHarness
         StackPanel envRows;
         Button envRedetect, envInstall;
         Border envGuideCard;
+        TextBlock envGuideDetail;
+        // 概览页环境缺失警告条
+        Border ovWarnBar;
+        TextBlock ovWarnText;
+        Button ovWarnBtn;
         // 插件页
         StackPanel pluginRows;
         TextBlock pluginSummary;
@@ -424,7 +430,7 @@ namespace DeepSeekHarness
         bool IsLauncherNewer()
         {
             Version cur, latest;
-            if (!Version.TryParse("1.0.7", out cur)) return false;
+            if (!Version.TryParse("1.0.8", out cur)) return false;
             if (!Version.TryParse(lupLatestStr, out latest)) return false;
             return latest > cur;
         }
@@ -720,7 +726,7 @@ namespace DeepSeekHarness
                 Margin = new Thickness(8, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            badge.Child = new TextBlock { Text = "v1.0.7", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 10, FontWeight = FontWeights.Bold };
+            badge.Child = new TextBlock { Text = "v1.0.8", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 10, FontWeight = FontWeights.Bold };
             brand.Children.Add(title);
             brand.Children.Add(badge);
 
@@ -866,7 +872,7 @@ namespace DeepSeekHarness
 
             sbRight = new TextBlock
             {
-                Text = "端口 8099 · 启动器 v1.0.7 (WPF)",
+                Text = "端口 8099 · 启动器 v1.0.8 (WPF)",
                 Foreground = Palette.Brush(Palette.TextFaint),
                 FontSize = 12,
                 HorizontalAlignment = HorizontalAlignment.Right,
@@ -895,6 +901,63 @@ namespace DeepSeekHarness
             };
 
             var stack = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+
+            // 环境缺失警告条 (新手醒目引导, 非技术人员也能看懂)
+            var warnBg = new SolidColorBrush(Palette.IsDark ? Color.FromArgb(60, 245, 158, 11) : Color.FromArgb(38, 245, 158, 11));
+            var warnGrid = new Grid();
+            warnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            warnGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var warnStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            ovWarnText = new TextBlock
+            {
+                Foreground = Palette.Brush(Palette.IsDark ? Color.FromRgb(251, 191, 36) : Color.FromRgb(180, 83, 9)),
+                FontSize = 13,
+                FontWeight = FontWeights.SemiBold,
+                TextWrapping = TextWrapping.Wrap
+            };
+            warnStack.Children.Add(ovWarnText);
+            warnStack.Children.Add(new TextBlock
+            {
+                Text = "不用懂技术，点右侧按钮，软件会自动帮你装好一切（约 1~2 分钟）",
+                Foreground = Palette.Brush(Palette.TextFaint),
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 2, 0, 0)
+            });
+            Grid.SetColumn(warnStack, 0);
+            warnGrid.Children.Add(warnStack);
+            ovWarnBtn = new Button
+            {
+                Content = "⚠ " + Lang.T("一键安装"),
+                Height = 40,
+                FontSize = 14,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = Brushes.White,
+                Background = Palette.Brush(Palette.Warn),
+                BorderThickness = new Thickness(0),
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center,
+                Padding = new Thickness(18, 0, 18, 0),
+                Margin = new Thickness(14, 0, 0, 0),
+                Effect = Palette.GlowEffect(Palette.Warn, 0.45)
+            };
+            ovWarnBtn.MouseEnter += delegate { ovWarnBtn.Background = Palette.Brush(Palette.WarnLight); ovWarnBtn.Effect = Palette.GlowEffect(Palette.Warn, 0.7); };
+            ovWarnBtn.MouseLeave += delegate { ovWarnBtn.Background = Palette.Brush(Palette.Warn); ovWarnBtn.Effect = Palette.GlowEffect(Palette.Warn, 0.45); };
+            ovWarnBtn.Click += delegate { RunInstall(); };
+            Grid.SetColumn(ovWarnBtn, 1);
+            warnGrid.Children.Add(ovWarnBtn);
+            ovWarnBar = new Border
+            {
+                Background = warnBg,
+                BorderBrush = Palette.Brush(Palette.Warn),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(16, 12, 16, 12),
+                Margin = new Thickness(0, 0, 0, 12),
+                Visibility = Visibility.Collapsed
+            };
+            ovWarnBar.Child = warnGrid;
+            stack.Children.Add(ovWarnBar);
 
             // 状态主卡 (微渐变面板 + 顶高光 + 悬浮状态灯)
             var hero = new Border
@@ -1255,25 +1318,36 @@ namespace DeepSeekHarness
                 bool dshOk = !string.IsNullOrEmpty(env.DshPath);
                 if (!nodeOk || !dshOk)
                 {
-                    ovStatus.Text = !nodeOk ? "● 未检测到 Node.js" : "● 未检测到 dsh";
+                    bool gitOk = !string.IsNullOrEmpty(env.GitPath);
+                    ovStatus.Text = "⚠ " + Lang.T("环境未安装");
                     ovStatus.Foreground = Palette.Brush(Palette.Warn);
-                    ovSub.Text = Lang.T("首次使用请点击「一键安装」");
-                    ovPrimary.Content = Lang.T("一键安装");
-                }
-                else if (running)
-                {
-                    ovStatus.Text = "● " + Lang.T("服务运行中");
-                    ovStatus.Foreground = Palette.Brush(Palette.Success);
-                    ovSub.Text = string.Format("http://127.0.0.1:{0} · dsh {1}", dsh.Cfg.Port, string.IsNullOrEmpty(env.DshVersion) ? "-" : env.DshVersion);
-                    ovPrimary.Content = "▶ " + Lang.T("打开浏览器");
+                    string missing = (!nodeOk ? "Node.js" : "") + (gitOk ? "" : (nodeOk ? "" : "、") + "Git") + (!dshOk ? (nodeOk && gitOk ? "" : "、") + "dsh" : "");
+                    ovSub.Text = "缺少: " + (missing.Length == 0 ? "必要组件" : missing) + " · " + Lang.T("首次使用请点击「一键安装」");
+                    ovPrimary.Content = "⚠ " + Lang.T("一键安装");
+                    if (ovWarnBar != null && ovWarnText != null)
+                    {
+                        ovWarnBar.Visibility = Visibility.Visible;
+                        ovWarnText.Text = "⚠ 还差 " + (missing.Length == 0 ? "环境组件" : missing) + " 就装好了";
+                    }
                 }
                 else
                 {
-                    ovStatus.Text = "● " + Lang.T("服务未启动");
-                    ovStatus.Foreground = Palette.Brush(Palette.TextDim);
-                ovSub.Text = Lang.T("环境已就绪，点击「一键启动」开始使用");
-                ovPrimary.Content = Lang.T("一键启动");
-            }
+                    if (ovWarnBar != null) ovWarnBar.Visibility = Visibility.Collapsed;
+                    if (running)
+                    {
+                        ovStatus.Text = "● " + Lang.T("服务运行中");
+                        ovStatus.Foreground = Palette.Brush(Palette.Success);
+                        ovSub.Text = string.Format("http://127.0.0.1:{0} · dsh {1}", dsh.Cfg.Port, string.IsNullOrEmpty(env.DshVersion) ? "-" : env.DshVersion);
+                        ovPrimary.Content = "▶ " + Lang.T("打开浏览器");
+                    }
+                    else
+                    {
+                        ovStatus.Text = "● " + Lang.T("服务未启动");
+                        ovStatus.Foreground = Palette.Brush(Palette.TextDim);
+                        ovSub.Text = Lang.T("环境已就绪，点击「一键启动」开始使用");
+                        ovPrimary.Content = Lang.T("一键启动");
+                    }
+                }
             string[] vers = { env.NodeVersion, env.NpmVersion, CleanVer(env.GitVersion), env.DshVersion };
             string[] paths = { env.NodePath, env.NpmPath, env.GitPath, env.DshPath };
             for (int i = 0; i < 4; i++)
@@ -1321,7 +1395,7 @@ namespace DeepSeekHarness
                 sbDot.Effect = running ? Palette.GlowEffect(Palette.Success, 0.7) : null;
                 sbText.Text = running ? Lang.T("服务已在运行") : Lang.T("服务未启动");
             }
-            sbRight.Text = string.Format(Lang.T("端口 {0} · 启动器 v1.0.7 (WPF)"), dsh.Cfg.Port);
+            sbRight.Text = string.Format(Lang.T("端口 {0} · 启动器 v1.0.8 (WPF)"), dsh.Cfg.Port);
             }
             catch { }
         }
@@ -1590,38 +1664,51 @@ namespace DeepSeekHarness
             toolbar.Children.Add(envInstall);
             stack.Children.Add(toolbar);
 
-            // 智能引导卡: dsh 未找到时引导用户 (已安装/未安装 + 多种定位方式)
+            // 新手引导卡 (醒目橙色边框): 环境缺失时用大白话引导, 一键自动补齐
             var guideCard = new Border
             {
                 Background = Palette.CardGradient(),
-                BorderBrush = Palette.CardBorderBrush(),
-                BorderThickness = new Thickness(1),
+                BorderBrush = Palette.Brush(Palette.Warn),
+                BorderThickness = new Thickness(2),
                 CornerRadius = new CornerRadius(14),
-                Padding = new Thickness(20, 16, 20, 16),
+                Padding = new Thickness(22, 18, 22, 18),
                 Margin = new Thickness(0, 12, 0, 0),
-                Effect = Palette.CardShadow(),
+                Effect = Palette.GlowEffect(Palette.Warn, 0.18),
                 Visibility = Visibility.Collapsed
             };
             var guideStack = new StackPanel();
             guideStack.Children.Add(new TextBlock
             {
-                Text = "🤔 " + Lang.T("未检测到 dsh，请选择你的情况"),
-                Foreground = Palette.Brush(Palette.Text),
-                FontSize = 15,
-                FontWeight = FontWeights.SemiBold,
+                Text = "🚀 " + Lang.T("还差一步就装好了"),
+                Foreground = Palette.Brush(Palette.Warn),
+                FontSize = 18,
+                FontWeight = FontWeights.Bold,
                 Margin = new Thickness(0, 0, 0, 6)
             });
             guideStack.Children.Add(new TextBlock
             {
-                Text = Lang.T("如果电脑上已经装过 dsh，选「已安装」让软件自动帮你找到它；没装过就点「一键安装」。"),
+                Text = "软件需要 4 样东西才能运行：Node.js（运行引擎）、npm（自带的下载器）、Git（下载工具）、dsh（主程序）。" +
+                       "下面缺哪样，点「一键安装」都会自动补上，全程不用你操作，也不会弹管理员密码。",
                 Foreground = Palette.Brush(Palette.TextDim),
-                FontSize = 12,
+                FontSize = 13,
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 0, 0, 10)
             });
+            // 缺失清单 (RenderEnv 动态更新)
+            envGuideDetail = new TextBlock
+            {
+                Foreground = Palette.Brush(Palette.Text),
+                FontSize = 13,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 12)
+            };
+            guideStack.Children.Add(envGuideDetail);
             var guideBtns = new StackPanel { Orientation = Orientation.Horizontal };
+            var installBig = Btn("🆕 " + Lang.T("一键安装"), delegate { RunInstall(); }, true);
+            installBig.Height = 44;
+            installBig.FontSize = 16;
+            guideBtns.Children.Add(installBig);
             guideBtns.Children.Add(Btn("✅ " + Lang.T("我已安装 dsh"), delegate { SmartLocateDsh(); }, false));
-            guideBtns.Children.Add(Btn("🆕 " + Lang.T("一键安装"), delegate { RunInstall(); }, true));
             guideStack.Children.Add(guideBtns);
             // 高级定位: 精确文件 / 模糊目录
             var advBtns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
@@ -1738,6 +1825,18 @@ namespace DeepSeekHarness
             bool dshMissing = string.IsNullOrEmpty(env.DshPath);
             if (envGuideCard != null)
                 envGuideCard.Visibility = dshMissing ? Visibility.Visible : Visibility.Collapsed;
+            if (envGuideDetail != null && dshMissing)
+            {
+                string[] gnm = { "Node.js", "npm", "Git", "dsh" };
+                string[] gpp = { env.NodePath, env.NpmPath, env.GitPath, env.DshPath };
+                var glines = new List<string>();
+                for (int gi = 0; gi < 4; gi++)
+                {
+                    bool gok = !string.IsNullOrEmpty(gpp[gi]);
+                    glines.Add((gok ? "✅ " : "❌ ") + gnm[gi] + (gok ? "" : "（未安装）"));
+                }
+                envGuideDetail.Text = string.Join("　", glines.ToArray());
+            }
             string[] names = { "Node.js", "npm", "Git", "dsh" };
             string[] vers = { env.NodeVersion, env.NpmVersion, CleanVer(env.GitVersion), env.DshVersion };
             string[] paths = { env.NodePath, env.NpmPath, env.GitPath, env.DshPath };
@@ -1809,7 +1908,12 @@ namespace DeepSeekHarness
             string defaultPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "node");
             string customPath = Prompt(
                 "一键安装 / 修复环境",
-                "即将为您自动下载并安装 Node.js 与 DeepSeek Harness 全局环境。\n\n如需自定义安装目录，请在下方修改目标文件夹；直接点击「确定安装」将使用默认绿色目录:\n" + defaultPath,
+                "软件会自动检查并补齐缺的东西（缺什么装什么，已装的不动）：\n\n" +
+                "① Node.js —— 运行引擎（缺才装，约 30MB）\n" +
+                "② Git —— 下载工具，插件安装/更新要用（缺才装，约 45MB）\n" +
+                "③ dsh —— DeepSeek Harness 主程序（缺才装）\n\n" +
+                "全部走国内镜像，不用代理、不用管理员密码，装完即用。\n" +
+                "如需自定义安装目录，请在下方修改目标文件夹；直接点「确定安装」用默认目录：\n" + defaultPath,
                 defaultPath
             );
             if (string.IsNullOrEmpty(customPath)) return;
@@ -1832,10 +1936,9 @@ namespace DeepSeekHarness
                     if (ok)
                     {
                         sbText.Text = "环境安装完成";
-                        if (!string.IsNullOrEmpty(dsh.Env.GitPath))
-                            ShowModernInfo(this, "一键安装", "环境安装完成！\n已自动写入系统环境变量 PATH，并配置持久化路径。\n点击「一键启动」即可开始使用。");
-                        else
-                            ShowModernInfo(this, "一键安装", "环境安装完成！\n已自动写入系统环境变量 PATH，并配置持久化路径。\n点击「一键启动」即可开始使用。\n\n提示：未检测到 Git。插件安装 / 更新功能需要 Git，建议前往 https://git-scm.com 下载安装。");
+                        ShowModernInfo(this, "一键安装", "全部装好了！\n" +
+                            "· Node.js ✓\n· Git ✓\n· dsh ✓\n\n" +
+                            "已自动写入系统 PATH，点击「一键启动」即可开始使用。");
                     }
                     else { sbText.Text = "安装未完成"; ShowModernWarn(this, "一键安装", error + "\n\n详细信息见 launcher.log。"); }
                 }));
@@ -2128,7 +2231,7 @@ namespace DeepSeekHarness
             lupTitleRow.Children.Add(new TextBlock { Text = "🚀 ", FontSize = 13, VerticalAlignment = VerticalAlignment.Center });
             lupTitleRow.Children.Add(new TextBlock { Text = Lang.T("启动器") + " (Launcher)", Foreground = Palette.Brush(Palette.Text), FontSize = 12, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
             lupCol.Children.Add(lupTitleRow);
-            upLupCur = new TextBlock { Text = Lang.T("当前") + " v1.0.7", Foreground = Palette.Brush(Palette.Text), FontSize = 14, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0) };
+            upLupCur = new TextBlock { Text = Lang.T("当前") + " v1.0.8", Foreground = Palette.Brush(Palette.Text), FontSize = 14, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0) };
             upLupLatest = new TextBlock { Text = Lang.T("未检查"), Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 2, 0, 0) };
             upLupNote = new TextBlock { Text = "", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
             lupCol.Children.Add(upLupCur);
@@ -2587,7 +2690,7 @@ namespace DeepSeekHarness
             }
             var headText = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
             headText.Children.Add(new TextBlock { Text = "DeepSeek Harness Launcher", Foreground = Palette.Brush(Palette.Text), FontSize = 16, FontWeight = FontWeights.Bold });
-            headText.Children.Add(new TextBlock { Text = "v1.0.7 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 3, 0, 0) });
+            headText.Children.Add(new TextBlock { Text = "v1.0.8 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 3, 0, 0) });
             head.Children.Add(headText);
             Grid.SetRow(head, 0);
             g.Children.Add(head);
@@ -2956,7 +3059,7 @@ namespace DeepSeekHarness
                 // 头部小标题
                 var head = new Grid { Margin = new Thickness(10, 3, 10, 4) };
                 var headTitle = new TextBlock { Text = "DeepSeek Harness", Foreground = Palette.Brush(Palette.Text), FontSize = 11, FontWeight = FontWeights.Bold };
-                var headVer = new TextBlock { Text = "v1.0.7", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 9, HorizontalAlignment = HorizontalAlignment.Right, FontWeight = FontWeights.SemiBold };
+                var headVer = new TextBlock { Text = "v1.0.8", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 9, HorizontalAlignment = HorizontalAlignment.Right, FontWeight = FontWeights.SemiBold };
                 head.Children.Add(headTitle);
                 head.Children.Add(headVer);
                 stack.Children.Add(head);
