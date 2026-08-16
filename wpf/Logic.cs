@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 //  DeepSeek Harness 启动器 - WPF 重构版 · 逻辑层
 //  从 WinForms 版移植: 命令助手 / 配置 / 环境检测 / 代理 / 服务 / 插件 / 商城 / 更新
 //  全部 UI 无关; 通过 OnStatus / OnLog 回调向界面汇报
@@ -56,7 +56,7 @@ namespace DeepSeekHarness
             { "正在刷新…", "Refreshing…" }, { "正在获取插件列表…", "Fetching plugin list…" },
             { "共 {0} 个插件 · 数据来自 GitHub", "{0} plugins from GitHub" }, { " · 缓存", " · cache" },
             { "GitHub 项目主页", "GitHub Project" },
-            { "启动器", "Launcher" }, { "端口 {0} · 启动器 v1.0.6 (WPF)", "Port {0} · Launcher v1.0.6 (WPF)" },
+            { "启动器", "Launcher" }, { "端口 {0} · 启动器 v1.0.7 (WPF)", "Port {0} · Launcher v1.0.7 (WPF)" },
             { "共 {0} 个目录 · {1} 个 git 仓库", "{0} dirs · {1} git repos" }, { "目录", "Folder" },
             { "打开浏览器", "Open Browser" }, { "最近日志", "Recent Log" }, { "暂无日志", "No logs yet" },
             { "未检测到", "Not found" }, { "代理", "Proxy" }, { "直连", "Direct" }, { "npm 镜像", "npm Mirror" },
@@ -590,6 +590,48 @@ namespace DeepSeekHarness
                 }
             }
             catch { return null; }
+        }
+
+        // 与 RunCaptureStatic 相同, 但失败/超时也返回已捕获的输出, 便于诊断真实报错
+        public static string RunCaptureOut(string program, string args, int timeoutMs, out int exitCode)
+        {
+            return RunCaptureOutEnv(program, args, timeoutMs, out exitCode, null);
+        }
+
+        static string RunCaptureOutEnv(string program, string args, int timeoutMs, out int exitCode, Dictionary<string, string> envSet)
+        {
+            exitCode = -1;   // -1 = 超时被终止
+            try
+            {
+                var psi = new ProcessStartInfo(program, args)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                if (envSet != null)
+                {
+                    foreach (var kv in envSet)
+                    {
+                        try { psi.EnvironmentVariables[kv.Key] = kv.Value; } catch { }
+                    }
+                }
+                using (var p = Process.Start(psi))
+                {
+                    var sb = new StringBuilder();
+                    p.OutputDataReceived += delegate(object o, DataReceivedEventArgs e) { if (e.Data != null) sb.AppendLine(e.Data); };
+                    p.ErrorDataReceived += delegate(object o, DataReceivedEventArgs e) { if (e.Data != null) sb.AppendLine(e.Data); };
+                    p.BeginOutputReadLine();
+                    p.BeginErrorReadLine();
+                    if (!p.WaitForExit(timeoutMs)) { try { p.Kill(); } catch { } return sb.ToString(); }
+                    p.WaitForExit();
+                    exitCode = p.ExitCode;
+                    return sb.ToString();
+                }
+            }
+            catch (Exception ex) { return "RUN_FAIL: " + ex.Message; }
         }
 
         public static string RunCapture(string program, string args, int timeoutMs)
@@ -1258,16 +1300,91 @@ namespace DeepSeekHarness
             return latest;
         }
 
-        public string NpmInstallGlobal(string pkg, int timeoutMs)
+        public string NpmInstallGlobal(string pkg, int timeoutMs, out string errDetail)
         {
-            Proc.DLog("npm", "install -g " + pkg + " reg=" + (string.IsNullOrEmpty(Cfg.NpmRegistry) ? "(default)" : Cfg.NpmRegistry));
-            string r = RunCapture("cmd.exe", "/c npm install -g " + pkg + NpmRegArg(), timeoutMs);
-            if (r == null && string.IsNullOrEmpty(Cfg.NpmRegistry))
+            errDetail = "";
+            // 尝试序列: 用户配置源(默认官方源) → 国内镜像 → 默认源+清除代理 → 国内镜像+清除代理
+            // (部分机器 npm 配置/环境变量残留失效代理, 导致所有源都连不上; 清除代理后重试可绕过)
+            var attempts = new List<KeyValuePair<string, bool>>();
+            if (!string.IsNullOrEmpty(Cfg.NpmRegistry)) attempts.Add(new KeyValuePair<string, bool>(Cfg.NpmRegistry, false));
+            else attempts.Add(new KeyValuePair<string, bool>(null, false));
+            attempts.Add(new KeyValuePair<string, bool>(MirrorRegistry, false));
+            attempts.Add(new KeyValuePair<string, bool>(null, true));
+            attempts.Add(new KeyValuePair<string, bool>(MirrorRegistry, true));
+
+            var seen = new HashSet<string>();
+            string lastOut = null;
+            int total = attempts.Count;
+            int shown = 0;
+            for (int i = 0; i < attempts.Count; i++)
             {
-                AppendLog("[npm] 安装失败, 回退国内镜像重试 " + MirrorRegistry);
-                r = RunCapture("cmd.exe", "/c npm install -g " + pkg + " --registry " + MirrorRegistry, timeoutMs);
+                string reg = attempts[i].Key;
+                bool clearProxy = attempts[i].Value;
+                string key = (reg ?? "<default>") + "|" + (clearProxy ? "noproxy" : "proxy");
+                if (!seen.Add(key)) { total--; continue; }
+                shown++;
+                string args = "install -g " + pkg + " --no-audit --no-fund --fetch-timeout=60000 --fetch-retries=1";
+                if (reg != null) args += " --registry " + reg;
+                Proc.DLog("npm", "attempt " + shown + "/" + total + ": " + args + (clearProxy ? " (clear-proxy)" : ""));
+                Report("正在安装 dsh（尝试 " + shown + "/" + total + "，源: " + (reg == null ? "默认" : "镜像") + "）…");
+                int code;
+                string outp;
+                if (clearProxy)
+                {
+                    var env = new Dictionary<string, string>();
+                    env["npm_config_proxy"] = ""; env["npm_config_https_proxy"] = "";
+                    env["HTTP_PROXY"] = ""; env["HTTPS_PROXY"] = ""; env["http_proxy"] = ""; env["https_proxy"] = "";
+                    outp = RunCaptureOutEnv("cmd.exe", "/c npm " + args, timeoutMs, out code, env);
+                }
+                else
+                {
+                    outp = RunCaptureOut("cmd.exe", "/c npm " + args, timeoutMs, out code);
+                }
+                if (code == 0) { errDetail = ""; return outp; }
+                lastOut = outp;
+                AppendLog("[npm] 尝试" + shown + "失败 (exit=" + code + (code == -1 ? " 超时被终止" : "") + "), 输出尾部:\n" + LastLines(outp, 30));
             }
-            return r;
+            errDetail = ExtractNpmError(lastOut);
+            return null;
+        }
+
+        static string LastLines(string s, int n)
+        {
+            if (string.IsNullOrEmpty(s)) return "(无输出)";
+            string[] lines = s.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            var sb = new StringBuilder();
+            int start = Math.Max(0, lines.Length - n);
+            for (int i = start; i < lines.Length; i++) sb.AppendLine(lines[i]);
+            return sb.ToString();
+        }
+
+        static string ExtractNpmError(string outp)
+        {
+            if (string.IsNullOrEmpty(outp)) return "无输出（可能网络无响应或超时）";
+            string[] lines = outp.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            var errs = new List<string>();
+            for (int i = lines.Length - 1; i >= 0 && errs.Count < 4; i--)
+            {
+                string l = lines[i].Trim();
+                if (l.IndexOf("npm ERR", StringComparison.OrdinalIgnoreCase) >= 0) errs.Add(CapLen(l, 220));
+            }
+            if (errs.Count == 0)
+            {
+                for (int i = lines.Length - 1; i >= 0 && errs.Count < 2; i--)
+                {
+                    string l = lines[i].Trim();
+                    if (l.IndexOf("error", StringComparison.OrdinalIgnoreCase) >= 0 && l.IndexOf("0 error", StringComparison.OrdinalIgnoreCase) < 0)
+                        errs.Add(CapLen(l, 220));
+                }
+            }
+            if (errs.Count == 0 && lines.Length > 0) errs.Add(CapLen(lines[lines.Length - 1].Trim(), 220));
+            return string.Join(Environment.NewLine, errs.ToArray());
+        }
+
+        static string CapLen(string s, int max)
+        {
+            if (s == null) return "";
+            return s.Length <= max ? s : s.Substring(0, max) + "…";
         }
 
         string FindDshPackageJson()
@@ -2532,18 +2649,44 @@ namespace DeepSeekHarness
                 if (!File.Exists(npmCmd)) npmCmd = "npm";
                 Proc.DLog("install", "node=" + nodeExe + " npmCmd=" + npmCmd);
                 Report("正在安装 dsh（npm install -g " + Cfg.NpmPackage + "）…");
-                string r = NpmInstallGlobal(Cfg.NpmPackage, 360000);
-                if (r == null) { error = "npm 安装 dsh 失败（超时）。请检查网络后重试。"; return false; }
-
-                // 检测全局 npm 路径并写入环境变量
-                string npmPrefix = RunCapture("cmd.exe", "/c npm config get prefix", 15000);
-                if (!string.IsNullOrEmpty(npmPrefix))
+                string detail;
+                string r = NpmInstallGlobal(Cfg.NpmPackage, 600000, out detail);
+                if (r == null)
                 {
-                    npmPrefix = npmPrefix.Trim().Trim('\r', '\n');
+                    error = "npm 安装 dsh 失败：\n" + detail
+                        + "\n\n已依次尝试官方源与国内镜像（含清除代理重试），完整输出见 launcher.log。";
+                    return false;
+                }
+
+                // 检测全局 npm 路径并写入环境变量(用户 + 当前进程, 免重启即可用)
+                string npmPrefix = "";
+                string got = RunCapture("cmd.exe", "/c npm config get prefix", 15000);
+                if (!string.IsNullOrEmpty(got))
+                {
+                    npmPrefix = got.Trim().Trim('\r', '\n');
                     if (Directory.Exists(npmPrefix)) AddUserPath(npmPrefix);
                 }
 
-                AppendLog("[install] dsh installed via npm (全局指令已就绪)");
+                // 安装后核验: dsh.cmd 或包目录必须真实存在, 防止 npm 假成功
+                bool verified = !string.IsNullOrEmpty(npmPrefix) && File.Exists(Path.Combine(npmPrefix, "dsh.cmd"));
+                if (!verified)
+                {
+                    string npmRoot = RunCapture("cmd.exe", "/c npm root -g", 15000);
+                    if (!string.IsNullOrEmpty(npmRoot))
+                    {
+                        string pkgJson = Path.Combine(npmRoot.Trim(), Cfg.NpmPackage, "package.json");
+                        if (File.Exists(pkgJson)) verified = true;
+                    }
+                }
+                if (!verified)
+                {
+                    error = "npm 报告安装成功，但未能定位 dsh 全局指令。\n"
+                        + "请打开命令行手动执行: npm install -g " + Cfg.NpmPackage + "\n"
+                        + "安装成功后点击「重新检测」，或重启本软件。";
+                    return false;
+                }
+
+                AppendLog("[install] dsh installed via npm (全局指令已就绪, prefix=" + npmPrefix + ")");
                 Report("环境安装完成");
                 return true;
             }
