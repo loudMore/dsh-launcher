@@ -141,10 +141,13 @@ namespace DeepSeekHarness
                 return;
             }
             try { Proc.DebugMode = Environment.GetEnvironmentVariable("DSH_LAUNCHER_DEBUG") == "1"; } catch { }
+            // 通用化保险: 无论从快捷方式/桌面/U盘启动 (CWD=桌面等), 立即把工作目录切到用户数据目录,
+            // 杜绝任何相对路径写入落到桌面/启动位置 (用户反馈: 1.0.7 快捷方式启动日志/插件跑到桌面)
+            try { Environment.CurrentDirectory = LauncherConfig.DataDir; } catch { }
             // 全局未捕获异常 → crash.log
             AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e)
             {
-                try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + e.ExceptionObject + "\r\n"); } catch { }
+                try { File.AppendAllText(Path.Combine(LauncherConfig.DataDir, "crash.log"), DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + e.ExceptionObject + "\r\n"); } catch { }
             };
             var app = new Application();
             app.ShutdownMode = ShutdownMode.OnExplicitShutdown;   // 托盘常驻, 退出走托盘菜单
@@ -556,7 +559,7 @@ namespace DeepSeekHarness
                                 {
                                     string err = dsh.InstallPluginFromUrl(url);
                                     Proc.DLog("action", "install " + url + " -> " + (err.Length == 0 ? "OK" : err));
-                                    File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "actions.log"), DateTime.Now.ToString("HH:mm:ss") + " install " + url + " -> " + (err.Length == 0 ? "OK" : err) + "\r\n");
+                                    File.AppendAllText(Path.Combine(LauncherConfig.DataDir, "actions.log"), DateTime.Now.ToString("HH:mm:ss") + " install " + url + " -> " + (err.Length == 0 ? "OK" : err) + "\r\n");
                                 });
                                 tt.IsBackground = true;
                                 tt.Start();
@@ -637,7 +640,7 @@ namespace DeepSeekHarness
                     sb.AppendLine("SELFTEST PASS");
                 }
                 catch (Exception ex) { sb.AppendLine("EXCEPTION: " + ex); }
-                try { File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "selftest.txt"), sb.ToString()); } catch { }
+                try { File.WriteAllText(Path.Combine(LauncherConfig.DataDir, "selftest.txt"), sb.ToString()); } catch { }
                 Dispatcher.BeginInvoke(new Action(delegate { sbText.Text = "自检完成，详见 selftest.txt"; }));
             });
             t.IsBackground = true;
@@ -1226,6 +1229,8 @@ namespace DeepSeekHarness
             {
                 string p = null;
                 try { p = dsh.ResolveProxy(); } catch { }          // 后台: 端口扫描可能耗时
+                // 自更新后自动同步桌面快捷方式 → 当前 exe (双击快捷方式永远是最新版; 沙盒模式不碰真实桌面)
+                if (!Dsh.SandboxMode) { try { dsh.SyncDesktopShortcut(); } catch { } }
                 var env = dsh.DetectEnvironment();
                 dsh.Env = env;
                 // 启动环境摘要写日志 (诊断包关键内容)
@@ -3136,7 +3141,8 @@ namespace DeepSeekHarness
                     string log2 = Path.Combine(dsh.Cfg.LogDir, "dsh.log");
                     if (!File.Exists(log2)) log2 = Path.Combine(dsh.Cfg.DshHome, "dsh.log");
                     if (File.Exists(log2)) File.Copy(log2, Path.Combine(tmp, "dsh.log"), true);
-                    string crash = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log");
+                    string crash = Path.Combine(LauncherConfig.DataDir, "crash.log");
+                    if (!File.Exists(crash)) crash = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log");   // 兼容旧版 exe 目录 crash.log
                     if (File.Exists(crash)) File.Copy(crash, Path.Combine(tmp, "crash.log"), true);
 
                     // 2. 配置 (代理密码脱敏)
