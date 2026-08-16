@@ -12,6 +12,7 @@ set WPF=/r:%GAC%\GAC_MSIL\PresentationFramework\v4.0_4.0.0.0__31bf3856ad364e35\P
 set WPF=%WPF% /r:%GAC%\GAC_64\PresentationCore\v4.0_4.0.0.0__31bf3856ad364e35\PresentationCore.dll
 set WPF=%WPF% /r:%GAC%\GAC_MSIL\WindowsBase\v4.0_4.0.0.0__31bf3856ad364e35\WindowsBase.dll
 set WPF=%WPF% /r:%GAC%\GAC_MSIL\System.Xaml\v4.0_4.0.0.0__b77a5c561934e089\System.Xaml.dll
+set WPF=%WPF% /r:%GAC%\GAC_MSIL\System.IO.Compression\v4.0_4.0.0.0__b77a5c561934e089\System.IO.Compression.dll
 set WPF=%WPF% /r:System.Web.Extensions.dll
 
 set RES=
