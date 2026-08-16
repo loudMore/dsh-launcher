@@ -1234,7 +1234,7 @@ namespace DeepSeekHarness
                     + " | Git=" + (string.IsNullOrEmpty(env.GitPath) ? "MISSING" : CleanVer(env.GitVersion))
                     + " | dsh=" + (string.IsNullOrEmpty(env.DshPath) ? "MISSING" : env.DshVersion + " @" + env.DshPath)
                     + " | port=" + dsh.Cfg.Port + (Dsh.IsPortOpen(dsh.Cfg.Port) ? " LISTENING" : " closed")
-                    + " | proxy=" + (string.IsNullOrEmpty(dsh.Cfg.Proxy) ? "(none)" : dsh.Cfg.Proxy));
+                    + " | proxy=" + (string.IsNullOrEmpty(dsh.EffectiveProxy) ? "(none)" : dsh.EffectiveProxy));
                 Dispatcher.BeginInvoke(new Action(delegate { lastProxy = p; RenderOverview(); RenderEnv(); }));
                 if (dsh.Cfg.CheckUpdatesOnStart)
                 {
@@ -1935,7 +1935,7 @@ namespace DeepSeekHarness
                     + " | Git=" + (string.IsNullOrEmpty(env.GitPath) ? "MISSING" : CleanVer(env.GitVersion))
                     + " | dsh=" + (string.IsNullOrEmpty(env.DshPath) ? "MISSING" : env.DshVersion + " @" + env.DshPath)
                     + " | port=" + dsh.Cfg.Port + (Dsh.IsPortOpen(dsh.Cfg.Port) ? " LISTENING" : " closed")
-                    + " | proxy=" + (string.IsNullOrEmpty(dsh.Cfg.Proxy) ? "(none)" : dsh.Cfg.Proxy));
+                    + " | proxy=" + (string.IsNullOrEmpty(dsh.EffectiveProxy) ? "(none)" : dsh.EffectiveProxy));
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     RenderEnv();
