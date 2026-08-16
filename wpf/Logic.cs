@@ -33,6 +33,7 @@ namespace DeepSeekHarness
             { "服务运行中", "Service Running" }, { "服务未启动", "Service Stopped" },
             { "环境已就绪，点击「一键启动」开始使用", "Ready — click Start to begin" },
             { "未检测到 Node.js", "Node.js not found" }, { "未检测到 dsh", "dsh not found" },
+            { "环境未安装", "Environment not installed" }, { "还差一步就装好了", "One step left — almost done!" },
             { "首次使用请点击「一键安装」", "First run? Click Install" },
             { "运行环境", "Environment" }, { "未检测到（可点击上方「一键安装」）", "Not found (click Install above)" },
             { "数据目录", "Data dir" }, { "(不存在)", "(missing)" },
@@ -56,7 +57,7 @@ namespace DeepSeekHarness
             { "正在刷新…", "Refreshing…" }, { "正在获取插件列表…", "Fetching plugin list…" },
             { "共 {0} 个插件 · 数据来自 GitHub", "{0} plugins from GitHub" }, { " · 缓存", " · cache" },
             { "GitHub 项目主页", "GitHub Project" },
-            { "启动器", "Launcher" }, { "端口 {0} · 启动器 v1.0.7 (WPF)", "Port {0} · Launcher v1.0.7 (WPF)" },
+            { "启动器", "Launcher" }, { "端口 {0} · 启动器 v1.0.8 (WPF)", "Port {0} · Launcher v1.0.8 (WPF)" },
             { "共 {0} 个目录 · {1} 个 git 仓库", "{0} dirs · {1} git repos" }, { "目录", "Folder" },
             { "打开浏览器", "Open Browser" }, { "最近日志", "Recent Log" }, { "暂无日志", "No logs yet" },
             { "未检测到", "Not found" }, { "代理", "Proxy" }, { "直连", "Direct" }, { "npm 镜像", "npm Mirror" },
@@ -562,6 +563,16 @@ namespace DeepSeekHarness
         public Action<string> OnLog;        // 日志回调
 
         const string MirrorRegistry = "https://registry.npmmirror.com";
+        const string HuaweiNpmMirror = "https://mirrors.huaweicloud.com/repository/npm/";
+        const string HuaweiNodeMirror = "https://mirrors.huaweicloud.com/nodejs/";
+        // GitHub 加速镜像 (无代理环境实测可用, 均支持 git 智能协议)
+        static readonly string[] GitProxyMirrors = {
+            "https://ghfast.top/",
+            "https://gh-proxy.com/",
+            "https://ghproxy.net/"
+        };
+        // MinGit: Git 命令行精简版, 国内镜像直链 (npmmirror, 实测 200)
+        const string MinGitUrl = "https://npmmirror.com/mirrors/git-for-windows/v2.47.1.windows.1/MinGit-2.47.1-64-bit.zip";
 
         // ---------- 命令助手 ----------
         public static string RunCaptureStatic(string program, string args, int timeoutMs)
@@ -681,8 +692,28 @@ namespace DeepSeekHarness
             string oldPath = Environment.GetEnvironmentVariable("Path");
             try { Environment.SetEnvironmentVariable("Path", prefix + oldPath); } catch { }
             string r = RunCapture(git, args, timeoutMs);
+            // 网络类操作失败时, 自动用 GitHub 加速镜像重试 (一次 -c insteadOf 映射, 不改用户配置)
+            if (r == null && IsGitNetOp(args))
+            {
+                foreach (string mirror in GitProxyMirrors)
+                {
+                    string mArgs = "-c url.\"" + mirror + "\".insteadOf=\"https://github.com/\" " + args;
+                    AppendLog("[git] 直连失败, 尝试镜像 " + mirror);
+                    string m = RunCapture(git, mArgs, timeoutMs);
+                    if (m != null) { AppendLog("[git] 镜像 " + mirror + " 成功"); r = m; break; }
+                }
+            }
             try { Environment.SetEnvironmentVariable("Path", oldPath); } catch { }
             return r;
+        }
+
+        static bool IsGitNetOp(string args)
+        {
+            return args.IndexOf("fetch", StringComparison.OrdinalIgnoreCase) >= 0
+                || args.IndexOf("pull", StringComparison.OrdinalIgnoreCase) >= 0
+                || args.IndexOf("clone", StringComparison.OrdinalIgnoreCase) >= 0
+                || args.IndexOf("ls-remote", StringComparison.OrdinalIgnoreCase) >= 0
+                || args.IndexOf("push", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         public void AppendLog(string line)
@@ -1292,10 +1323,15 @@ namespace DeepSeekHarness
         public string QueryNpmLatest(string pkg)
         {
             string latest = RunCapture("cmd.exe", "/c npm view " + pkg + " version" + NpmRegArg(), 25000);
-            if (latest == null && string.IsNullOrEmpty(Cfg.NpmRegistry))
+            if (latest == null)
             {
                 AppendLog("[npm] 官方源查询失败, 回退国内镜像 " + MirrorRegistry);
                 latest = RunCapture("cmd.exe", "/c npm view " + pkg + " version --registry " + MirrorRegistry, 30000);
+            }
+            if (latest == null)
+            {
+                AppendLog("[npm] npmmirror 查询失败, 回退华为云 " + HuaweiNpmMirror);
+                latest = RunCapture("cmd.exe", "/c npm view " + pkg + " version --registry " + HuaweiNpmMirror, 30000);
             }
             return latest;
         }
@@ -1303,14 +1339,15 @@ namespace DeepSeekHarness
         public string NpmInstallGlobal(string pkg, int timeoutMs, out string errDetail)
         {
             errDetail = "";
-            // 尝试序列: 用户配置源(默认官方源) → 国内镜像 → 默认源+清除代理 → 国内镜像+清除代理
+            // 尝试序列: 配置源/官方 → npmmirror → 华为云 → 清除代理后 npmmirror → 华为云
             // (部分机器 npm 配置/环境变量残留失效代理, 导致所有源都连不上; 清除代理后重试可绕过)
             var attempts = new List<KeyValuePair<string, bool>>();
             if (!string.IsNullOrEmpty(Cfg.NpmRegistry)) attempts.Add(new KeyValuePair<string, bool>(Cfg.NpmRegistry, false));
             else attempts.Add(new KeyValuePair<string, bool>(null, false));
             attempts.Add(new KeyValuePair<string, bool>(MirrorRegistry, false));
-            attempts.Add(new KeyValuePair<string, bool>(null, true));
+            attempts.Add(new KeyValuePair<string, bool>(HuaweiNpmMirror, false));
             attempts.Add(new KeyValuePair<string, bool>(MirrorRegistry, true));
+            attempts.Add(new KeyValuePair<string, bool>(HuaweiNpmMirror, true));
 
             var seen = new HashSet<string>();
             string lastOut = null;
@@ -1337,7 +1374,8 @@ namespace DeepSeekHarness
                 string args = "install -g " + pkg + flags;
                 if (reg != null) args += " --registry " + reg;
                 Proc.DLog("npm", "attempt " + shown + "/" + total + ": " + args + (clearProxy ? " (clear-proxy)" : ""));
-                Report("正在安装 dsh（尝试 " + shown + "/" + total + "，源: " + (reg == null ? "默认" : "镜像") + "）…");
+                string regName = reg == null ? "官方源" : (reg == MirrorRegistry ? "npmmirror" : (reg == HuaweiNpmMirror ? "华为云" : "备用源"));
+                Report("正在安装 dsh（尝试 " + shown + "/" + total + "，" + regName + (clearProxy ? "·清代理" : "") + "）…");
                 int code;
                 string outp;
                 if (clearProxy)
@@ -1697,12 +1735,22 @@ namespace DeepSeekHarness
                     stillMissing.Add(d);
                 }
 
-                // 3. 剩余缺失: npm install (插件目录内)
+                // 3. 剩余缺失: npm install (插件目录内, 失败自动回退镜像)
                 if (stillMissing.Count > 0)
                 {
                     string reg = NpmRegArg();
                     Report("正在为 " + p.Name + " 安装依赖…");
                     string r = RunCapture("cmd.exe", "/c cd /d \"" + p.Path + "\" && npm install --no-audit --no-fund" + reg, 600000);
+                    if (r == null)
+                    {
+                        AppendLog("[plugin] npm install 失败, 回退 npmmirror: " + p.Name);
+                        r = RunCapture("cmd.exe", "/c cd /d \"" + p.Path + "\" && npm install --no-audit --no-fund --registry " + MirrorRegistry, 600000);
+                    }
+                    if (r == null)
+                    {
+                        AppendLog("[plugin] npmmirror 失败, 回退华为云: " + p.Name);
+                        r = RunCapture("cmd.exe", "/c cd /d \"" + p.Path + "\" && npm install --no-audit --no-fund --registry " + HuaweiNpmMirror, 600000);
+                    }
                     if (r == null) return "依赖安装失败: " + string.Join(", ", stillMissing.ToArray()) + "（网络或包源问题）";
                 }
 
@@ -2509,12 +2557,14 @@ namespace DeepSeekHarness
             return results.ToArray();
         }
 
-        // ---------- 启动器自更新检查 (多源: 配置源 → jsDelivr CDN) ----------
+        // ---------- 启动器自更新检查 (多源: 配置源 → jsDelivr CDN → raw → ghfast 代理) ----------
         public string CheckLauncherUpdate()
         {
             var urls = new List<string>();
             if (!string.IsNullOrEmpty(Cfg.LauncherUpdateUrl)) urls.Add(Cfg.LauncherUpdateUrl);
             urls.Add("https://cdn.jsdelivr.net/gh/loudMore/dsh-launcher@main/version.txt");
+            urls.Add("https://raw.githubusercontent.com/loudMore/dsh-launcher/main/version.txt");
+            urls.Add("https://ghfast.top/https://raw.githubusercontent.com/loudMore/dsh-launcher/main/version.txt");
             foreach (string u in urls)
             {
                 Proc.DLog("lupd", "try " + u);
@@ -2535,11 +2585,13 @@ namespace DeepSeekHarness
         {
             string[] indexUrls = {
                 "https://nodejs.org/dist/index.json",
-                "https://npmmirror.com/mirrors/node/index.json"
+                "https://npmmirror.com/mirrors/node/index.json",
+                HuaweiNodeMirror + "index.json"
             };
             string[] distBases = {
                 "https://nodejs.org/dist/",
-                "https://npmmirror.com/mirrors/node/"
+                "https://npmmirror.com/mirrors/node/",
+                HuaweiNodeMirror
             };
             string arch = Environment.Is64BitOperatingSystem ? "x64" : "x86";
             for (int i = 0; i < indexUrls.Length; i++)
@@ -2585,6 +2637,70 @@ namespace DeepSeekHarness
             catch { }
         }
 
+        // ---------- Git 一键安装 (MinGit 国内镜像, 用户目录绿色安装, 无需管理员) ----------
+        public string InstallGitNow(out string error)
+        {
+            error = "";
+            try
+            {
+                // 已存在直接成功
+                string where = RunCapture("where", "git", 10000);
+                if (where != null && where.Trim().Length > 0) return "git 已存在: " + FirstLine(where);
+
+                Report("未检测到 Git，正在从国内镜像下载（约 45MB，请稍候）…");
+                string home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MinGit");
+                string zip = Path.Combine(Path.GetTempPath(), "mingit-" + Guid.NewGuid().ToString("N") + ".zip");
+                if (!DownloadFile(MinGitUrl, zip))
+                {
+                    AppendLog("[install] MinGit 下载失败: " + MinGitUrl);
+                    error = "Git 下载失败（npmmirror 镜像不可达，请检查网络后重试）";
+                    return null;
+                }
+
+                string tmp = Path.Combine(Path.GetTempPath(), "mingit-x-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(tmp);
+                Report("正在解压安装 Git…");
+                string tar = RunCapture("tar.exe", "-xf \"" + zip + "\" -C \"" + tmp + "\"", 180000);
+                if (tar == null) { error = "解压 Git 失败（系统可能缺少 tar.exe）"; return null; }
+                // MinGit zip 顶层即 Git 根目录 (含 cmd/ mingw64/ usr/), 直接用解压根目录
+                string srcRoot = tmp;
+                if (!File.Exists(Path.Combine(srcRoot, "cmd", "git.exe")))
+                {
+                    // 兼容个别版本带一层子目录的情况
+                    string[] dirs = Directory.GetDirectories(tmp);
+                    if (dirs.Length == 0) { error = "解压后未找到 Git 目录"; return null; }
+                    if (File.Exists(Path.Combine(dirs[0], "cmd", "git.exe"))) srcRoot = dirs[0];
+                    else { error = "解压后未找到 git.exe"; return null; }
+                }
+
+                if (Directory.Exists(home)) { try { Directory.Delete(home, true); } catch { } }
+                Directory.CreateDirectory(home);
+                foreach (string file in Directory.GetFiles(srcRoot, "*", SearchOption.AllDirectories))
+                {
+                    string rel = file.Substring(srcRoot.Length).TrimStart('\\', '/');
+                    string dest = Path.Combine(home, rel);
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                    File.Copy(file, dest, true);
+                }
+                try { File.Delete(zip); } catch { }
+                try { Directory.Delete(tmp, true); } catch { }
+
+                // 写入用户 + 当前进程 PATH (免重启即可用)
+                string bin = Path.Combine(home, "cmd");
+                AddUserPath(bin);
+                string ver = RunCapture(Path.Combine(bin, "git.exe"), "--version", 15000);
+                if (ver == null)
+                {
+                    error = "Git 已解压但无法运行，请重启本软件后重新检测";
+                    return null;
+                }
+                AppendLog("[install] Git installed -> " + bin + " (" + FirstLine(ver) + ")");
+                Report("Git 安装完成");
+                return FirstLine(ver);
+            }
+            catch (Exception ex) { error = ex.Message; return null; }
+        }
+
         // ---------- 一键安装 (支持指定路径或默认 LocalAppData) ----------
         public bool InstallDshNow(out string error, string customNodeDir = null)
         {
@@ -2604,10 +2720,17 @@ namespace DeepSeekHarness
                     Report("正在下载 Node.js " + ver + "（约 30MB）…");
                     if (!DownloadFile(nodeUrl, zip))
                     {
-                        string mirrorZip = "https://npmmirror.com/mirrors/node/" + ver + "/node-" + ver + "-win-" + arch + ".zip";
-                        AppendLog("[install] 官方源下载失败, 回退镜像 " + mirrorZip);
-                        if (!DownloadFile(mirrorZip, zip))
-                        { error = "Node.js 下载失败（请检查网络后重试）"; return false; }
+                        // 依次回退国内镜像: npmmirror → 华为云
+                        string[] mirrorBases = { "https://npmmirror.com/mirrors/node/", HuaweiNodeMirror };
+                        bool gotZip = false;
+                        foreach (string mb in mirrorBases)
+                        {
+                            string mirrorZip = mb + ver + "/node-" + ver + "-win-" + arch + ".zip";
+                            AppendLog("[install] 官方源下载失败, 回退镜像 " + mirrorZip);
+                            if (DownloadFile(mirrorZip, zip)) { gotZip = true; break; }
+                        }
+                        if (!gotZip)
+                        { error = "Node.js 下载失败（官方与国内镜像均不可达，请检查网络后重试）"; return false; }
                     }
 
                     if (!string.IsNullOrEmpty(customNodeDir))
@@ -2659,6 +2782,20 @@ namespace DeepSeekHarness
                 string npmCmd = Path.Combine(nodeHome, "npm.cmd");
                 if (!File.Exists(npmCmd)) npmCmd = "npm";
                 Proc.DLog("install", "node=" + nodeExe + " npmCmd=" + npmCmd);
+
+                // 全环境补齐: Git 缺失时自动安装 (插件安装/更新需要 git)
+                string gitWhere = RunCapture("where", "git", 10000);
+                if (gitWhere == null || gitWhere.Trim().Length == 0)
+                {
+                    string gErr;
+                    string gVer = InstallGitNow(out gErr);
+                    if (gVer == null)
+                    {
+                        error = gErr + "\n（Git 未能自动安装，可稍后到 https://git-scm.com 手动下载，或重试一键安装）";
+                        return false;
+                    }
+                }
+
                 Report("正在安装 dsh（npm install -g " + Cfg.NpmPackage + "）…");
                 string detail;
                 string r = NpmInstallGlobal(Cfg.NpmPackage, 600000, out detail);
