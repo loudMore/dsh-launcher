@@ -1101,6 +1101,16 @@ namespace DeepSeekHarness
         string detectedProxy;
         bool proxyChecked;
 
+        // 当前实际生效的代理 (探测结果, 只读; 不写回 Cfg.Proxy 防"断代理后残留死代理")
+        public string EffectiveProxy
+        {
+            get
+            {
+                try { ResolveProxy(); } catch { }
+                return detectedProxy;
+            }
+        }
+
         // 本地端口是否在监听 (TCP 快速探测 ~120ms/个, 不启动进程, 用于过滤死端口)
         static bool IsLocalPortListening(int port)
         {
