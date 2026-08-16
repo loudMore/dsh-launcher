@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 //  DeepSeek Harness 启动器 - WPF 重构版 (代码式 WPF, 无 XAML 编译链)
 //  v0.1 骨架: 深色主题 + WindowChrome 无边框窗(原生缩放/吸附) + 侧栏导航 + 切页淡入动画
 //  编译: build.bat (仅用系统自带 csc + GAC WPF 程序集)
@@ -257,7 +257,7 @@ namespace DeepSeekHarness
             stack.Children.Add(logoEl);
             stack.Children.Add(new TextBlock { Text = "DeepSeek Harness Launcher", Foreground = Palette.Brush(Palette.Text), FontSize = 19, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 16, 0, 0) });
             stack.Children.Add(new TextBlock { Text = Lang.T("DSH 启动器 · WPF 旗舰版"), Foreground = Palette.Brush(Palette.TextDim), FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0) });
-            stack.Children.Add(new TextBlock { Text = "v1.0.6 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 0) });
+            stack.Children.Add(new TextBlock { Text = "v1.0.7 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 0) });
             // 加载动画条
             var bar = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Palette.Brush(Palette.BgInput), Margin = new Thickness(30, 16, 30, 0) };
             var fill = new Border { Width = 60, CornerRadius = new CornerRadius(2), Background = Palette.Brush(Palette.Blue), HorizontalAlignment = HorizontalAlignment.Left };
@@ -424,7 +424,7 @@ namespace DeepSeekHarness
         bool IsLauncherNewer()
         {
             Version cur, latest;
-            if (!Version.TryParse("1.0.6", out cur)) return false;
+            if (!Version.TryParse("1.0.7", out cur)) return false;
             if (!Version.TryParse(lupLatestStr, out latest)) return false;
             return latest > cur;
         }
@@ -720,7 +720,7 @@ namespace DeepSeekHarness
                 Margin = new Thickness(8, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center
             };
-            badge.Child = new TextBlock { Text = "v1.0.6", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 10, FontWeight = FontWeights.Bold };
+            badge.Child = new TextBlock { Text = "v1.0.7", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 10, FontWeight = FontWeights.Bold };
             brand.Children.Add(title);
             brand.Children.Add(badge);
 
@@ -866,7 +866,7 @@ namespace DeepSeekHarness
 
             sbRight = new TextBlock
             {
-                Text = "端口 8099 · 启动器 v1.0.6 (WPF)",
+                Text = "端口 8099 · 启动器 v1.0.7 (WPF)",
                 Foreground = Palette.Brush(Palette.TextFaint),
                 FontSize = 12,
                 HorizontalAlignment = HorizontalAlignment.Right,
@@ -1321,7 +1321,7 @@ namespace DeepSeekHarness
                 sbDot.Effect = running ? Palette.GlowEffect(Palette.Success, 0.7) : null;
                 sbText.Text = running ? Lang.T("服务已在运行") : Lang.T("服务未启动");
             }
-            sbRight.Text = string.Format(Lang.T("端口 {0} · 启动器 v1.0.6 (WPF)"), dsh.Cfg.Port);
+            sbRight.Text = string.Format(Lang.T("端口 {0} · 启动器 v1.0.7 (WPF)"), dsh.Cfg.Port);
             }
             catch { }
         }
@@ -1829,7 +1829,14 @@ namespace DeepSeekHarness
                     SetBusy(false);
                     RenderEnv();
                     RenderOverview();
-                    if (ok) { sbText.Text = "环境安装完成"; ShowModernInfo(this, "一键安装", "环境安装完成！\n已自动写入系统环境变量 PATH，并配置持久化路径。\n点击「一键启动」即可开始使用。"); }
+                    if (ok)
+                    {
+                        sbText.Text = "环境安装完成";
+                        if (!string.IsNullOrEmpty(dsh.Env.GitPath))
+                            ShowModernInfo(this, "一键安装", "环境安装完成！\n已自动写入系统环境变量 PATH，并配置持久化路径。\n点击「一键启动」即可开始使用。");
+                        else
+                            ShowModernInfo(this, "一键安装", "环境安装完成！\n已自动写入系统环境变量 PATH，并配置持久化路径。\n点击「一键启动」即可开始使用。\n\n提示：未检测到 Git。插件安装 / 更新功能需要 Git，建议前往 https://git-scm.com 下载安装。");
+                    }
                     else { sbText.Text = "安装未完成"; ShowModernWarn(this, "一键安装", error + "\n\n详细信息见 launcher.log。"); }
                 }));
             });
@@ -2121,7 +2128,7 @@ namespace DeepSeekHarness
             lupTitleRow.Children.Add(new TextBlock { Text = "🚀 ", FontSize = 13, VerticalAlignment = VerticalAlignment.Center });
             lupTitleRow.Children.Add(new TextBlock { Text = Lang.T("启动器") + " (Launcher)", Foreground = Palette.Brush(Palette.Text), FontSize = 12, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
             lupCol.Children.Add(lupTitleRow);
-            upLupCur = new TextBlock { Text = Lang.T("当前") + " v1.0.6", Foreground = Palette.Brush(Palette.Text), FontSize = 14, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0) };
+            upLupCur = new TextBlock { Text = Lang.T("当前") + " v1.0.7", Foreground = Palette.Brush(Palette.Text), FontSize = 14, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 6, 0, 0) };
             upLupLatest = new TextBlock { Text = Lang.T("未检查"), Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 2, 0, 0) };
             upLupNote = new TextBlock { Text = "", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 0) };
             lupCol.Children.Add(upLupCur);
@@ -2270,7 +2277,8 @@ namespace DeepSeekHarness
             SetBusy(true);
             var t = new Thread(delegate()
             {
-                string r = dsh.NpmInstallGlobal(dsh.Cfg.NpmPackage, 360000);
+                string detail;
+                string r = dsh.NpmInstallGlobal(dsh.Cfg.NpmPackage, 600000, out detail);
                 var env = dsh.DetectEnvironment();
                 dsh.Env = env;
                 // 重新检查更新状态, 让"立即升级 dsh"按钮立即变为"✓ 已是最新"
@@ -2282,7 +2290,7 @@ namespace DeepSeekHarness
                     RenderUpdate();
                     RenderOverview();
                     sbText.Text = r == null ? "升级失败" : "dsh 升级完成";
-                    if (r == null) ShowModernWarn(this, "升级 dsh", "升级失败（网络或超时），详见日志。");
+                    if (r == null) ShowModernWarn(this, "升级 dsh", "升级失败（已尝试官方源与国内镜像）。\n" + detail + "\n\n详见 launcher.log。");
                     else ShowModernInfo(this, "升级 dsh", "dsh 已升级到最新版。");
                 }));
             });
@@ -2579,7 +2587,7 @@ namespace DeepSeekHarness
             }
             var headText = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
             headText.Children.Add(new TextBlock { Text = "DeepSeek Harness Launcher", Foreground = Palette.Brush(Palette.Text), FontSize = 16, FontWeight = FontWeights.Bold });
-            headText.Children.Add(new TextBlock { Text = "v1.0.6 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 3, 0, 0) });
+            headText.Children.Add(new TextBlock { Text = "v1.0.7 · by loudMore", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 12, Margin = new Thickness(0, 3, 0, 0) });
             head.Children.Add(headText);
             Grid.SetRow(head, 0);
             g.Children.Add(head);
@@ -2948,7 +2956,7 @@ namespace DeepSeekHarness
                 // 头部小标题
                 var head = new Grid { Margin = new Thickness(10, 3, 10, 4) };
                 var headTitle = new TextBlock { Text = "DeepSeek Harness", Foreground = Palette.Brush(Palette.Text), FontSize = 11, FontWeight = FontWeights.Bold };
-                var headVer = new TextBlock { Text = "v1.0.6", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 9, HorizontalAlignment = HorizontalAlignment.Right, FontWeight = FontWeights.SemiBold };
+                var headVer = new TextBlock { Text = "v1.0.7", Foreground = Palette.Brush(Palette.IsDark ? Palette.Cyan : Palette.Blue), FontSize = 9, HorizontalAlignment = HorizontalAlignment.Right, FontWeight = FontWeights.SemiBold };
                 head.Children.Add(headTitle);
                 head.Children.Add(headVer);
                 stack.Children.Add(head);
