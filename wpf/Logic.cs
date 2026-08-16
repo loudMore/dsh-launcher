@@ -5,6 +5,7 @@
 // ============================================================
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -48,6 +49,7 @@ namespace DeepSeekHarness
             { "发现新版本！", "New version!" }, { "插件更新", "Plugin updates" },
             { "自动刷新", "Auto refresh" }, { "打开日志目录", "Open Log Folder" },
             { "保存设置", "Save Settings" }, { "自动检测回填", "Auto-detect" }, { "打开配置文件", "Open Config" },
+            { "导出诊断包", "Export Diagnostics" },
             { "服务端口", "Port" }, { "界面语言", "Language" }, { "npm 包名", "npm Package" },
             { "启动器更新源", "Launcher Update URL" }, { "代理地址", "Proxy" },
             { "获取列表", "Fetch List" }, { "打开网页", "Open Web" }, { "搜索插件…", "Search plugins…" },
@@ -57,14 +59,14 @@ namespace DeepSeekHarness
             { "正在刷新…", "Refreshing…" }, { "正在获取插件列表…", "Fetching plugin list…" },
             { "共 {0} 个插件 · 数据来自 GitHub", "{0} plugins from GitHub" }, { " · 缓存", " · cache" },
             { "GitHub 项目主页", "GitHub Project" },
-            { "启动器", "Launcher" }, { "端口 {0} · 启动器 v1.0.8 (WPF)", "Port {0} · Launcher v1.0.8 (WPF)" },
+            { "启动器", "Launcher" }, { "端口 {0} · 启动器 v{1} (WPF)", "Port {0} · Launcher v{1} (WPF)" },
             { "共 {0} 个目录 · {1} 个 git 仓库", "{0} dirs · {1} git repos" }, { "目录", "Folder" },
             { "打开浏览器", "Open Browser" }, { "最近日志", "Recent Log" }, { "暂无日志", "No logs yet" },
             { "未检测到", "Not found" }, { "代理", "Proxy" }, { "直连", "Direct" }, { "npm 镜像", "npm Mirror" },
             { "重启服务", "Restart" }, { "滚轮滚动 · 完整日志在「日志」页", "Scroll · full log in Logs" },
             { "桌面快捷方式", "Desktop Shortcut" }, { "检测代理", "Detect Proxy" }, { "选择文件", "Browse" },
             { "服务已在运行", "Service running" }, { "界面主题", "Theme" }, { "深色模式 (Dark)", "Dark Mode" }, { "浅色模式 (Light)", "Light Mode" },
-            { "清空显示", "Clear Log" }, { "复制日志", "Copy Log" }, { "搜索过滤…", "Filter logs…" }, { "已复制到剪贴板", "Copied to clipboard" },
+            { "清空显示", "Clear Log" }, { "清空界面", "Clear View" }, { "复制日志", "Copy Log" }, { "搜索过滤…", "Filter logs…" }, { "已复制到剪贴板", "Copied to clipboard" },
             { "{0} 个插件", "{0} plugins" }, { "正在检查…", "Checking…" }, { "正在更新所有插件…", "Updating all plugins…" },
             { "核心服务与路径", "Core & Paths" }, { "网络、包源与更新", "Network, Registry & Updates" }, { "界面外观与个性化", "Appearance & Language" },
             { "配置文件", "Config File" },
@@ -569,6 +571,10 @@ namespace DeepSeekHarness
         // 隐藏参数 --sandbox 注入: 环境检测只信进程 PATH (跳过注册表/常见目录深度扫描),
         // 配合受限 PATH 启动可完整模拟"全新用户"的检测结果 (仅用于隔离测试)
         public static bool SandboxMode = false;
+        // 隐藏参数 --diag-test: 启动后自动导出诊断包并退出 (仅用于自动化测试)
+        public static bool DiagTestMode = false;
+        // 启动器当前版本 (唯一真相源; 所有 UI 显示与升级判断都从这里读, 防止多处硬编码漂移)
+        public const string LauncherVersion = "1.0.8";
 
         public LauncherConfig Cfg;
         public EnvInfo Env = new EnvInfo();
@@ -745,12 +751,23 @@ namespace DeepSeekHarness
         public void AppendLog(string line)
         {
             if (string.IsNullOrEmpty(line)) return;
+            string text = DateTime.Now.ToString("HH:mm:ss") + "  " + line + "\r\n";
             try
             {
                 Directory.CreateDirectory(Cfg.LogDir);
-                File.AppendAllText(Path.Combine(Cfg.LogDir, "launcher.log"), DateTime.Now.ToString("HH:mm:ss") + "  " + line + "\r\n");
+                File.AppendAllText(Path.Combine(Cfg.LogDir, "launcher.log"), text);
             }
-            catch { }
+            catch (Exception ex)
+            {
+                // 主路径失败时写错误诊断 (便于定位), 并尝试 exe 目录兜底
+                try
+                {
+                    File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launcher-append-error.log"),
+                        DateTime.Now.ToString("HH:mm:ss") + "  append failed (" + (Cfg == null ? "Cfg=null" : "logDir='" + Cfg.LogDir + "'") + "): " + ex + "\r\n");
+                }
+                catch { }
+                try { File.AppendAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "launcher.log"), text); } catch { }
+            }
             if (OnLog != null) { try { OnLog(line); } catch { } }
         }
 
@@ -1076,10 +1093,43 @@ namespace DeepSeekHarness
             return found.Count > 0 ? found[0] : "";
         }
 
-        // ---------- 代理: 多级自动探测 ----------
+        // ---------- 代理: 浏览器同源 · 多级智能探测 ----------
+        // 参考 Chrome/Edge 的做法: 先读系统注册表这条"写好的答案", 绝不逐个猜端口。
+        // 快路径(注册表/显式配置/环境变量) 返回即用, 慢路径(端口扫描)仅在全部缺失时兜底,
+        // 且只对"真在监听"的本地端口验证, 整轮带时间预算, 不再逐个 curl 盲猜。
         static readonly string[] ProxyPorts = { "7890", "7897", "7891", "7892", "7893", "7894", "7895", "7896", "10809", "10808", "1080", "8118", "2080", "8888", "1087" };
         string detectedProxy;
         bool proxyChecked;
+
+        // 本地端口是否在监听 (TCP 快速探测 ~120ms/个, 不启动进程, 用于过滤死端口)
+        static bool IsLocalPortListening(int port)
+        {
+            try
+            {
+                using (var c = new TcpClient())
+                {
+                    var ar = c.BeginConnect("127.0.0.1", port, null, null);
+                    bool ok = ar.AsyncWaitHandle.WaitOne(120);
+                    if (ok) { c.EndConnect(ar); return true; }
+                    return false;
+                }
+            }
+            catch { return false; }
+        }
+
+        // 代理地址"看起来还活着?" -- 本地回环端口做快速监听核验, 远程直接信任 (与浏览器一致)
+        static bool ProxyLikelyAlive(string p)
+        {
+            try
+            {
+                if (p.IndexOf("://") < 0) p = "http://" + p;
+                var u = new Uri(p);
+                string host = u.Host;
+                if (host == "127.0.0.1" || host == "localhost" || host == "::1") return IsLocalPortListening(u.Port);
+                return true;
+            }
+            catch { return true; }
+        }
 
         bool TestProxy(string p)
         {
@@ -1090,63 +1140,86 @@ namespace DeepSeekHarness
             return r != null && r.IndexOf("zen", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        public string ResolveProxy()
+        // 系统注册表代理 (浏览器同源事实源): ProxyEnable=1 时读 ProxyServer
+        static string ReadSystemProxy()
         {
-            if (!string.IsNullOrEmpty(Cfg.Proxy))
+            try
             {
-                if (TestProxy(Cfg.Proxy)) { ApplyProxy(Cfg.Proxy); return Cfg.Proxy; }
-            }
-            if (proxyChecked) return detectedProxy;
-            proxyChecked = true;
-
-            string env = Environment.GetEnvironmentVariable("HTTPS_PROXY");
-            if (string.IsNullOrEmpty(env)) env = Environment.GetEnvironmentVariable("HTTP_PROXY");
-            if (string.IsNullOrEmpty(env)) env = Environment.GetEnvironmentVariable("ALL_PROXY");
-            if (!string.IsNullOrEmpty(env) && TestProxy(env)) detectedProxy = env;
-
-            if (detectedProxy == null)
-            {
-                try
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Internet Settings"))
                 {
-                    using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Internet Settings"))
+                    if (k != null && Convert.ToInt32(k.GetValue("ProxyEnable", 0)) == 1)
                     {
-                        if (k != null && Convert.ToInt32(k.GetValue("ProxyEnable", 0)) == 1)
+                        string ps = k.GetValue("ProxyServer") as string;
+                        if (!string.IsNullOrEmpty(ps))
                         {
-                            string ps = k.GetValue("ProxyServer") as string;
-                            if (!string.IsNullOrEmpty(ps))
-                            {
-                                Match m = Regex.Match(ps, "(https?|socks)=([^;]+)");
-                                string host = m.Success ? m.Groups[2].Value.Trim() : ps.Trim();
-                                string scheme = m.Success ? (m.Groups[1].Value == "socks" ? "socks://" : "http://") : "http://";
-                                if (host.IndexOf("://") < 0) host = scheme + host;
-                                if (TestProxy(host)) detectedProxy = host;
-                            }
+                            Match m = Regex.Match(ps, "(https?|socks)=([^;]+)");
+                            string host = m.Success ? m.Groups[2].Value.Trim() : ps.Trim();
+                            string scheme = m.Success ? (m.Groups[1].Value == "socks" ? "socks://" : "http://") : "http://";
+                            if (host.IndexOf("://") < 0) host = scheme + host;
+                            return host;
                         }
                     }
                 }
-                catch { }
             }
+            catch { }
+            return null;
+        }
 
-            if (detectedProxy == null)
-            {
-                foreach (string port in ProxyPorts)
-                {
-                    string p = "http://127.0.0.1:" + port;
-                    if (TestProxy(p)) { detectedProxy = p; break; }
-                }
-            }
+        public string ResolveProxy()
+        {
+            if (proxyChecked) return detectedProxy;
+            proxyChecked = true;
 
-            if (detectedProxy != null)
+            // ① 用户显式配置 (最高优先, 只信活的)
+            if (!string.IsNullOrEmpty(Cfg.Proxy) && ProxyLikelyAlive(Cfg.Proxy))
             {
-                Proc.DLog("proxy", "detected " + detectedProxy);
+                detectedProxy = Cfg.Proxy;
                 ApplyProxy(detectedProxy);
-                if (string.IsNullOrEmpty(Cfg.Proxy))
+                Proc.DLog("proxy", "config " + detectedProxy);
+                return detectedProxy;
+            }
+
+            // ② 系统注册表代理 (浏览器同源, ~0ms, 不 curl; 本地端口快速核验)
+            string sys = ReadSystemProxy();
+            if (!string.IsNullOrEmpty(sys) && ProxyLikelyAlive(sys))
+            {
+                detectedProxy = sys;
+                ApplyProxy(detectedProxy);
+                Proc.DLog("proxy", "system " + detectedProxy);
+                return detectedProxy;
+            }
+
+            // ③ 环境变量 (原来残留过期死代理会害人, 只在活着时采纳)
+            string env = Environment.GetEnvironmentVariable("HTTPS_PROXY");
+            if (string.IsNullOrEmpty(env)) env = Environment.GetEnvironmentVariable("HTTP_PROXY");
+            if (string.IsNullOrEmpty(env)) env = Environment.GetEnvironmentVariable("ALL_PROXY");
+            if (!string.IsNullOrEmpty(env) && ProxyLikelyAlive(env))
+            {
+                detectedProxy = env;
+                ApplyProxy(detectedProxy);
+                Proc.DLog("proxy", "env " + detectedProxy);
+                return detectedProxy;
+            }
+
+            // ④ 端口扫描兜底: 先 TCP 监听过滤, 只测真在监听的端口; 时间预算封顶 (~3s)
+            long tBudget = Environment.TickCount + 3000;
+            foreach (string port in ProxyPorts)
+            {
+                if (Environment.TickCount > tBudget) break;
+                int pn;
+                if (!int.TryParse(port, out pn)) continue;
+                if (!IsLocalPortListening(pn)) continue;   // 死端口直接跳过, 不 curl
+                string p = "http://127.0.0.1:" + port;
+                if (TestProxy(p))
                 {
-                    Cfg.Proxy = detectedProxy;
-                    try { Cfg.Save(); } catch { }
+                    detectedProxy = p;
+                    ApplyProxy(detectedProxy);
+                    Proc.DLog("proxy", "local " + p);
+                    return detectedProxy;
                 }
             }
-            return detectedProxy;
+
+            return null;
         }
 
         void ApplyProxy(string p)
@@ -1442,6 +1515,34 @@ namespace DeepSeekHarness
             int start = Math.Max(0, lines.Length - n);
             for (int i = start; i < lines.Length; i++) sb.AppendLine(lines[i]);
             return sb.ToString();
+        }
+
+        // ---------- zip 解压 (纯 .NET ZipArchive, 不依赖系统 tar.exe; 老系统/精简系统也能装) ----------
+        // 返回解压后的根目录 (若 zip 顶层是单目录则返回该目录, 否则返回目标目录本身)
+        public static string ExtractZip(string zipPath, string destDir)
+        {
+            Directory.CreateDirectory(destDir);
+            using (var fs = File.OpenRead(zipPath))
+            using (var zip = new System.IO.Compression.ZipArchive(fs, System.IO.Compression.ZipArchiveMode.Read))
+            {
+                foreach (var entry in zip.Entries)
+                {
+                    // entry.FullName 统一正斜杠; 跳过目录项与危险路径 (.. / 绝对路径)
+                    string rel = entry.FullName.Replace('/', '\\');
+                    if (rel.IndexOf("..", StringComparison.Ordinal) >= 0) continue;
+                    if (rel.EndsWith("\\", StringComparison.Ordinal) || rel.Length == 0) continue;
+                    string dest = Path.Combine(destDir, rel);
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest));
+                    using (var es = entry.Open())
+                    using (var outFs = new FileStream(dest, FileMode.Create))
+                        es.CopyTo(outFs);
+                }
+            }
+            // 若解压结果顶层只有一个目录 → 返回它 (统一移入外部调用方)
+            string[] top = Directory.GetDirectories(destDir);
+            string[] topFiles = Directory.GetFiles(destDir);
+            if (top.Length == 1 && topFiles.Length == 0) return top[0];
+            return destDir;
         }
 
         static string ExtractNpmError(string outp)
@@ -2595,8 +2696,14 @@ namespace DeepSeekHarness
         }
 
         // ---------- 启动器自更新检查 (多源: 配置源 → jsDelivr CDN → raw → ghfast 代理) ----------
+        // version.txt 内容:
+        //   1.0.8
+        //   sha256=8FB7...   (可选, 下载后用哈希校验; 缺省则退回 PE 校验)
+        public string LauncherUpdateHash = "";
+
         public string CheckLauncherUpdate()
         {
+            LauncherUpdateHash = "";
             var urls = new List<string>();
             if (!string.IsNullOrEmpty(Cfg.LauncherUpdateUrl)) urls.Add(Cfg.LauncherUpdateUrl);
             urls.Add("https://cdn.jsdelivr.net/gh/loudMore/dsh-launcher@main/version.txt");
@@ -2611,10 +2718,176 @@ namespace DeepSeekHarness
                 if (lines.Length > 0)
                 {
                     Match m = Regex.Match(lines[0].Trim(), "(\\d+\\.\\d+\\.\\d+)");
-                    if (m.Success) return m.Groups[1].Value;
+                    if (m.Success)
+                    {
+                        // 解析可选 sha256 行 (向前兼容, 无哈希也能用)
+                        foreach (string ln in lines)
+                        {
+                            Match hm = Regex.Match(ln.Trim(), "sha256\\s*=\\s*([0-9A-Fa-f]{64})");
+                            if (hm.Success) { LauncherUpdateHash = hm.Groups[1].Value.ToUpperInvariant(); break; }
+                        }
+                        return m.Groups[1].Value;
+                    }
                 }
             }
             return null;
+        }
+
+        // 启动器新版本 exe 下载候选链: 官方 → ghfast → gh-proxy → ghproxy (版本化文件名绕 CDN 缓存)
+        public string[] LauncherDownloadUrls(string version)
+        {
+            string path = "loudMore/dsh-launcher/releases/download/v" + version + "/DeepSeekHarness-v" + version + ".exe";
+            return new string[]
+            {
+                "https://github.com/" + path,
+                "https://ghfast.top/" + path,
+                "https://gh-proxy.com/" + path,
+                "https://ghproxy.net/" + path
+            };
+        }
+
+        // ---------- 启动器自更新: 下载 + 校验 ----------
+        // 沙盒(隔离测试): 允许下载校验到临时文件, 但绝不替换真实 exe (与 RunInstall 同策略)
+        public bool DownloadLauncherUpdate(string version, out string destPath, out string error, Action<int> progress)
+        {
+            destPath = "";
+            error = "";
+            foreach (string url in LauncherDownloadUrls(version))
+            {
+                Proc.DLog("lupd", "download " + url);
+                if (progress != null) { try { progress(3); } catch { } }
+                try
+                {
+                    string dest = Path.Combine(Path.GetTempPath(), "dsh-launcher-update-" + version + ".exe");
+                    using (var wc = new WebClient())
+                    {
+                        WebProxy wp = null;
+                        try { wp = CurrentWebProxy(); } catch { }
+                        wc.Proxy = wp;
+                        var done = new ManualResetEvent(false);
+                        Exception dlErr = null;
+                        wc.DownloadProgressChanged += delegate(object o, DownloadProgressChangedEventArgs e)
+                        {
+                            if (progress != null) { try { progress(e.ProgressPercentage); } catch { } }
+                        };
+                        wc.DownloadFileCompleted += delegate(object o, AsyncCompletedEventArgs e)
+                        {
+                            dlErr = e.Error;
+                            done.Set();
+                        };
+                        wc.DownloadFileAsync(new Uri(url), dest);
+                        done.WaitOne(240000);
+                        if (dlErr != null) throw dlErr;
+                    }
+                    if (progress != null) { try { progress(100); } catch { } }
+                    if (VerifyLauncherExe(dest, version, LauncherUpdateHash))
+                    {
+                        AppendLog("[lupd] download+verify ok: " + url);
+                        destPath = dest;
+                        error = "";
+                        return true;
+                    }
+                    error = "文件校验不通过（下载不完整或版本不符）：" + url;
+                    AppendLog("[lupd] verify fail: " + url);
+                    try { if (File.Exists(dest)) File.Delete(dest); } catch { }
+                }
+                catch (Exception ex)
+                {
+                    error = "下载失败：" + ex.Message;
+                    AppendLog("[lupd] download fail: " + url + " -> " + ex.Message);
+                    try { if (File.Exists(Path.Combine(Path.GetTempPath(), "dsh-launcher-update-" + version + ".exe"))) File.Delete(Path.Combine(Path.GetTempPath(), "dsh-launcher-update-" + version + ".exe")); } catch { }
+                }
+            }
+            return false;
+        }
+
+        // 校验: MZ 头 + 最小体积 + UTF-16PE 版本字符串 + (可选)期望 SHA256
+        public static bool VerifyLauncherExe(string path, string version, string expectedHash)
+        {
+            try
+            {
+                var fi = new FileInfo(path);
+                if (!fi.Exists || fi.Length < 200000) return false;      // 过小 → 不可能是本程序
+                using (var fs = File.OpenRead(path))
+                {
+                    byte[] head = new byte[2];
+                    if (fs.Read(head, 0, 2) != 2) return false;
+                    if (head[0] != 0x4D || head[1] != 0x5A) return false; // MZ
+                }
+                byte[] b = File.ReadAllBytes(path);
+                if (!string.IsNullOrEmpty(version)
+                    && IndexOfBytes(b, Encoding.Unicode.GetBytes(version)) < 0) return false;       // PE 内版本字符串
+                if (IndexOfBytes(b, Encoding.Unicode.GetBytes("DeepSeekHarness")) < 0) return false; // 程序特征名
+                if (!string.IsNullOrEmpty(expectedHash))
+                {
+                    using (var sha = System.Security.Cryptography.SHA256.Create())
+                    {
+                        byte[] h = sha.ComputeHash(b);
+                        var sb = new StringBuilder();
+                        for (int i = 0; i < h.Length; i++) sb.Append(h[i].ToString("X2"));
+                        if (!sb.ToString().Equals(expectedHash, StringComparison.OrdinalIgnoreCase)) return false;
+                    }
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        static int IndexOfBytes(byte[] hay, byte[] needle)
+        {
+            for (int i = 0; i <= hay.Length - needle.Length; i++)
+            {
+                bool ok = true;
+                for (int j = 0; j < needle.Length; j++)
+                    if (hay[i + j] != needle[j]) { ok = false; break; }
+                if (ok) return i;
+            }
+            return -1;
+        }
+
+        // ---------- 启动器自更新: 守护替换 + 自动重启 ----------
+        // 当前 exe 被运行中实例锁定无法覆盖, 采用独立 updater 脚本:
+        // 等本进程退出 → 覆盖 DeepSeekHarness.exe → 重启 → 自删。
+        // 不影响 / 不触碰 8099 dsh 服务进程 (它由独立 node 进程承载)。
+        public void ApplyLauncherUpdate(string newPath)
+        {
+            try
+            {
+                string exe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "DeepSeekHarness.exe");
+                string updater = Path.Combine(Path.GetTempPath(), "dsh-update-" + Guid.NewGuid().ToString("N") + ".ps1");
+                var sb = new StringBuilder();
+                sb.AppendLine("$ErrorActionPreference = 'Stop'");
+                sb.AppendLine("$target = '" + exe.Replace("'", "''") + "'");
+                sb.AppendLine("$new = '" + newPath.Replace("'", "''") + "'");
+                sb.AppendLine("$dir = '" + AppDomain.CurrentDomain.BaseDirectory.Replace("'", "''") + "'");
+                sb.AppendLine("$gone = $false");
+                sb.AppendLine("for ($i = 0; $i -lt 60; $i++) {");
+                sb.AppendLine("  $p = Get-Process -Name DeepSeekHarness -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $target }");
+                sb.AppendLine("  if (-not $p) { $gone = $true; break }");
+                sb.AppendLine("  Start-Sleep -Milliseconds 500");
+                sb.AppendLine("}");
+                sb.AppendLine("if (-not $gone) { exit 1 }");
+                sb.AppendLine("Start-Sleep -Milliseconds 500");
+                sb.AppendLine("for ($i = 0; $i -lt 20; $i++) {");
+                sb.AppendLine("  try { Copy-Item -Path $new -Destination $target -Force; break } catch { Start-Sleep -Milliseconds 500 }");
+                sb.AppendLine("}");
+                sb.AppendLine("Start-Process -FilePath $target -WorkingDirectory $dir");
+                sb.AppendLine("Remove-Item -Path $new -Force -ErrorAction SilentlyContinue");
+                sb.AppendLine("Remove-Item -Path $PSCommandPath -Force -ErrorAction SilentlyContinue");
+                File.WriteAllText(updater, sb.ToString(), new UTF8Encoding(false));
+                var psi = new ProcessStartInfo("powershell.exe",
+                    "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" + updater + "\"")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                try { AppendLog("[lupd] apply updater error: " + ex.Message); } catch { }
+            }
         }
 
         // ---------- 一键安装 (Node.js + dsh) ----------
@@ -2725,24 +2998,38 @@ namespace DeepSeekHarness
                 Report("未检测到 Git，正在从国内镜像下载（约 45MB，请稍候）…");
                 string home = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "MinGit");
                 string zip = Path.Combine(Path.GetTempPath(), "mingit-" + Guid.NewGuid().ToString("N") + ".zip");
-                if (!DownloadFile(MinGitUrl, zip))
+                // MinGit 多镜像下载: npmmirror 主源 + 直连 GitHub edge 加速兜底
+                // (npmmirror 大文件偶发 403/限速, 无代理用户也能装)
+                string[] gitZips = {
+                    MinGitUrl,
+                    "https://ghfast.top/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/MinGit-2.47.1-64-bit.zip",
+                    "https://gh-proxy.com/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/MinGit-2.47.1-64-bit.zip",
+                    "https://ghproxy.net/https://github.com/git-for-windows/git/releases/download/v2.47.1.windows.1/MinGit-2.47.1-64-bit.zip"
+                };
+                bool gitGot = false;
+                foreach (string gz in gitZips)
                 {
-                    AppendLog("[install] MinGit 下载失败: " + MinGitUrl);
-                    error = "Git 下载失败（npmmirror 镜像不可达，请检查网络后重试）";
+                    Proc.DLog("install", "git download " + gz);
+                    if (DownloadFile(gz, zip)) { gitGot = true; break; }
+                    try { if (File.Exists(zip)) File.Delete(zip); } catch { }
+                }
+                if (!gitGot)
+                {
+                    AppendLog("[install] MinGit 下载失败 (全部镜像): " + MinGitUrl);
+                    error = "Git 下载失败（国内镜像与官方加速均不可达，请检查网络后重试）";
                     return null;
                 }
 
                 string tmp = Path.Combine(Path.GetTempPath(), "mingit-x-" + Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(tmp);
                 Report("正在解压安装 Git…");
-                string tar = RunCapture("tar.exe", "-xf \"" + zip + "\" -C \"" + tmp + "\"", 180000);
-                if (tar == null) { error = "解压 Git 失败（系统可能缺少 tar.exe）"; return null; }
+                string srcRoot;
+                try { srcRoot = ExtractZip(zip, tmp); }
+                catch (Exception ex2) { error = "解压 Git 失败: " + ex2.Message; return null; }
                 // MinGit zip 顶层即 Git 根目录 (含 cmd/ mingw64/ usr/), 直接用解压根目录
-                string srcRoot = tmp;
                 if (!File.Exists(Path.Combine(srcRoot, "cmd", "git.exe")))
                 {
                     // 兼容个别版本带一层子目录的情况
-                    string[] dirs = Directory.GetDirectories(tmp);
+                    string[] dirs = Directory.GetDirectories(srcRoot);
                     if (dirs.Length == 0) { error = "解压后未找到 Git 目录"; return null; }
                     if (File.Exists(Path.Combine(dirs[0], "cmd", "git.exe"))) srcRoot = dirs[0];
                     else { error = "解压后未找到 git.exe"; return null; }
@@ -2818,20 +3105,26 @@ namespace DeepSeekHarness
                     }
 
                     string tmp = Path.Combine(Path.GetTempPath(), "node-x-" + Guid.NewGuid().ToString("N"));
-                    Directory.CreateDirectory(tmp);
+                    Report("正在解压安装 Node.js…");
+                    string nodeRoot;
+                    try { nodeRoot = ExtractZip(zip, tmp); }
+                    catch (Exception ex2) { error = "解压 Node.js 失败: " + ex2.Message; return false; }
+                    if (!File.Exists(Path.Combine(nodeRoot, "node.exe")))
+                    {
+                        // 兼容带一层子目录的形式 (node-vX-win-x64/ → node.exe)
+                        string[] dirs = Directory.GetDirectories(nodeRoot);
+                        if (dirs.Length == 0 || !File.Exists(Path.Combine(dirs[0], "node.exe")))
+                        { error = "解压后未找到 Node.js 目录"; return false; }
+                        nodeRoot = dirs[0];
+                    }
+
                     if (Directory.Exists(nodeHome)) { try { Directory.Delete(nodeHome, true); } catch { } }
                     Directory.CreateDirectory(nodeHome);
 
-                    Report("正在解压安装 Node.js…");
-                    string tar = RunCapture("tar.exe", "-xf \"" + zip + "\" -C \"" + tmp + "\"", 120000);
-                    if (tar == null) { error = "解压 Node.js 失败（系统可能缺少 tar.exe）"; return false; }
-                    string[] dirs = Directory.GetDirectories(tmp);
-                    if (dirs.Length == 0) { error = "解压后未找到 Node.js 目录"; return false; }
-
                     // 移动解压文件到指定目标目录
-                    foreach (string file in Directory.GetFiles(dirs[0], "*", SearchOption.AllDirectories))
+                    foreach (string file in Directory.GetFiles(nodeRoot, "*", SearchOption.AllDirectories))
                     {
-                        string rel = file.Substring(dirs[0].Length).TrimStart('\\', '/');
+                        string rel = file.Substring(nodeRoot.Length).TrimStart('\\', '/');
                         string dest = Path.Combine(nodeHome, rel);
                         Directory.CreateDirectory(Path.GetDirectoryName(dest));
                         File.Copy(file, dest, true);
