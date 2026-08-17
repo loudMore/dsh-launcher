@@ -512,7 +512,7 @@ namespace DeepSeekHarness
             Palette.IsDark = (dsh.Cfg.Theme != "light");
             Lang.Set(dsh.Cfg.Language);
             Background = Palette.Brush(Palette.Bg);
-            try { Environment.SetEnvironmentVariable("DSH_HOME", dsh.Cfg.DshHome); } catch { }
+            // DSH_HOME 已改为仅注入服务进程 (Logic.StartServiceAsync), 不再污染全局环境
             // WindowChrome: 原生无边框体验 —— 四边缩放指针、最大化、Aero 吸附全是系统级, GPU 合成丝滑
             var chrome = new WindowChrome();
             chrome.CaptionHeight = 44;
@@ -658,7 +658,7 @@ namespace DeepSeekHarness
                     sb.AppendLine("updates: dshUpdate=" + info.DshUpdate + " cur=" + info.DshCurrent + " latest=" + info.DshLatest + " plugins=" + info.PluginCount);
                     string lup = dsh.CheckLauncherUpdate();
                     sb.AppendLine("launcher latest: " + (lup ?? "none"));
-                    var store = Dsh.FetchStore(proxy);
+                    var store = Dsh.FetchStore();
                     sb.AppendLine("store fetched: " + store.Count + " items" + (store.Count > 0 ? " (first: " + store[0].FullName + " stars=" + store[0].Stars + ")" : ""));
                     if (store.Count > 0) StoreCache.SaveList(store);
                     long age;
@@ -1254,7 +1254,7 @@ namespace DeepSeekHarness
         void StartDetect()
         {
             if (dsh.Cfg == null) dsh.Cfg = LauncherConfig.Load();
-            try { Environment.SetEnvironmentVariable("DSH_HOME", dsh.Cfg.DshHome); } catch { }
+            // DSH_HOME 已改为仅注入服务进程 (Logic.StartServiceAsync), 不再污染全局环境
             dsh.OnStatus = delegate(string s) { Dispatcher.BeginInvoke(new Action(delegate { sbText.Text = s; })); };
             dsh.OnLog = delegate(string s) { };
             var t = new Thread(delegate()
