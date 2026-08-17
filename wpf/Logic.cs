@@ -590,7 +590,7 @@ namespace DeepSeekHarness
         // 检测隔离模式: 沙盒 或 安装测试 (都只信进程 PATH, 跳过注册表/深度扫描)
         public static bool SandboxLike { get { return SandboxMode || InstallTestMode; } }
         // 启动器当前版本 (唯一真相源; 所有 UI 显示与升级判断都从这里读, 防止多处硬编码漂移)
-        public const string LauncherVersion = "1.1.0";
+        public const string LauncherVersion = "1.1.1";
 
         public LauncherConfig Cfg;
         public EnvInfo Env = new EnvInfo();
@@ -711,24 +711,35 @@ namespace DeepSeekHarness
             }
             // 网络类 git 操作自动附加代理参数 (git 不读系统代理, 需要显式 -c http.proxy;
             // 代理地址每次现取 Net, 断代理自动回直连)
-            string proxyArgs = "";
             string proxy = null;
             try { proxy = Net.ProxyUrl(); } catch { }
+            // git 的伴随工具路径 (ssh/askpass 等) 只注入本次子进程环境,
+            // 不改本进程全局 Path (多线程并发跑 git 时改全局会互相踩)
+            var gitEnv = new Dictionary<string, string>();
+            if (prefix.Length > 0)
+                gitEnv["Path"] = prefix + (Environment.GetEnvironmentVariable("Path") ?? "");
+            Func<string, string, string> run = delegate(string prog, string a)
+            {
+                int code;
+                string o = RunCaptureOutEnv(prog, a, timeoutMs, out code, gitEnv.Count > 0 ? gitEnv : null);
+                if (o == null || o.StartsWith("RUN_FAIL:")) return null;
+                if (code != 0) return null;   // 与旧 RunCapture 语义一致: 非零退出 = 失败
+                return o;
+            };
+            string proxyArgs = "";
             if (!string.IsNullOrEmpty(proxy))
             {
                 proxyArgs = "-c http.proxy=\"" + proxy + "\" -c https.proxy=\"" + proxy + "\" ";
             }
-            string oldPath = Environment.GetEnvironmentVariable("Path");
-            try { Environment.SetEnvironmentVariable("Path", prefix + oldPath); } catch { }
-            string r = RunCapture(git, proxyArgs + args, timeoutMs);
-            // 网络类操作失败时的自适应链: ①代理失败→转直连 ②直连失败→GitHub 加速镜像
+            string r = run(git, proxyArgs + args);
+            // 网络类操作失败时的自适应链: ①代理失败->转直连 ②直连失败->GitHub 加速镜像
             // (一次 -c insteadOf 映射, 不改用户配置; 兼容开了/没开代理的两种用户)
             if (r == null && IsGitNetOp(args))
             {
                 if (proxyArgs.Length > 0)
                 {
                     AppendLog("[git] 代理 " + proxy + " 失败, 转直连重试");
-                    r = RunCapture(git, args, timeoutMs);
+                    r = run(git, args);
                 }
                 if (r == null)
                 {
@@ -736,12 +747,11 @@ namespace DeepSeekHarness
                     {
                         string mArgs = "-c url.\"" + mirror + "\".insteadOf=\"https://github.com/\" " + args;
                         AppendLog("[git] 直连失败, 尝试镜像 " + mirror);
-                        string m = RunCapture(git, mArgs, timeoutMs);
+                        string m = run(git, mArgs);
                         if (m != null) { AppendLog("[git] 镜像 " + mirror + " 成功"); r = m; break; }
                     }
                 }
             }
-            try { Environment.SetEnvironmentVariable("Path", oldPath); } catch { }
             return r;
         }
 
@@ -968,8 +978,9 @@ namespace DeepSeekHarness
             return env;
         }
 
-        // ---------- 智能 dsh 定位 (多策略深度扫描) ----------
-        // 返回找到的 dsh.cmd / dsh.exe / dsh 的绝对路径, 找不到返回 ""
+        // ---------- 智能 dsh 定位 ----------
+        // 查找顺序 = 快且通用优先: ① 配置指定 ② where (PATH) ③ PATH 目录直查 (免拉 cmd, 毫秒级)
+        // ④ npm 全局目录 ⑤ 通用常见安装位置递归 (限时兜底)
         public string DeepFindDsh()
         {
             try
@@ -978,8 +989,8 @@ namespace DeepSeekHarness
                 if (Cfg.DshCommand.IndexOf('\\') >= 0 && File.Exists(Cfg.DshCommand))
                     return Cfg.DshCommand;
 
-                // 2. where dsh (PATH)
-                string where = RunCapture("where", "dsh", 10000);
+                // 2. where dsh (系统级 PATH 解析, 结果即权威)
+                string where = RunCapture("where", "dsh", 8000);
                 if (where != null)
                 {
                     string[] lines = where.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -993,9 +1004,23 @@ namespace DeepSeekHarness
                     }
                 }
 
-                if (SandboxLike) return "";   // 沙盒模式: 深度扫描全部跳过, 仅 where 结果
+                // 3. PATH 各目录直查 (where 失败/受限时的快速替代, 纯文件系统操作)
+                foreach (string dir in AllPathDirs())
+                {
+                    try
+                    {
+                        foreach (string n in new string[] { "dsh.cmd", "dsh.exe", "dsh" })
+                        {
+                            string f = Path.Combine(dir, n);
+                            if (File.Exists(f)) return f;
+                        }
+                    }
+                    catch { }
+                }
 
-                // 3. npm 全局目录: npm prefix -g → node_modules/.bin/dsh.cmd
+                if (SandboxLike) return "";   // 沙盒模式: 深度扫描全部跳过, 仅 PATH 结果
+
+                // 4. npm 全局目录: npm prefix -g -> node_modules/.bin/dsh.cmd
                 string npmGlobal = FindNpmGlobalDir();
                 if (!string.IsNullOrEmpty(npmGlobal))
                 {
@@ -1009,7 +1034,7 @@ namespace DeepSeekHarness
                         if (File.Exists(c)) return c;
                 }
 
-                // 4. 通用常见安装位置 (仅跨机器标准位置; npm prefix 已在上方第 3 步覆盖)
+                // 5. 通用常见安装位置递归 (最后兜底, 单树限时 4s)
                 string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
                 string[] commonDirs = {
                     Path.Combine(userProfile, "npm-global"),
@@ -1026,39 +1051,24 @@ namespace DeepSeekHarness
                     string found = FindDshInTree(d, 4);
                     if (found.Length > 0) return found;
                 }
-
-                // 5. PATH 全目录浅扫
-                foreach (string dir in AllPathDirs())
-                {
-                    try
-                    {
-                        string f = Path.Combine(dir, "dsh.cmd");
-                        if (File.Exists(f)) return f;
-                        f = Path.Combine(dir, "dsh.exe");
-                        if (File.Exists(f)) return f;
-                        f = Path.Combine(dir, "dsh");
-                        if (File.Exists(f)) return f;
-                        f = Path.Combine(dir, "dsh.cjs");
-                        if (File.Exists(f)) return f;
-                    }
-                    catch { }
-                }
             }
             catch { }
             return "";
         }
 
-        // 在目录树中递归查找 dsh 可执行文件 (限深防卡死)
+        // 在目录树中递归查找 dsh 可执行文件 (限深 + 限时, 双保险防慢盘/深树卡死)
         // 支持: dsh.cmd / dsh.exe / dsh (全局安装) + dsh.cjs / dsh.js (源码版入口)
         public static string FindDshInTree(string root, int maxDepth)
         {
             var found = new List<string>();
+            long deadline = Environment.TickCount + 4000;   // 单树最多 4s (兜底路径, 不该久等)
             try
             {
                 Action<string, int> walk = null;
                 walk = delegate(string dir, int depth)
                 {
                     if (depth > maxDepth || found.Count > 0) return;
+                    if (Environment.TickCount > deadline) return;
                     try
                     {
                         // 跳过 node_modules 深层 (内部可能有海量重复)
@@ -1295,6 +1305,10 @@ namespace DeepSeekHarness
                         RedirectStandardError = true,
                         WorkingDirectory = Cfg.LogDir
                     };
+                    // DSH_HOME 只注入服务进程 (dsh 的数据目录开关),
+                    // 不写本进程全局环境, 避免影响后续 npm/git 等其他子进程
+                    if (!string.IsNullOrEmpty(Cfg.DshHome))
+                        psi.EnvironmentVariables["DSH_HOME"] = Cfg.DshHome;
                     var p = new Process { StartInfo = psi };
                     p.OutputDataReceived += delegate(object o, DataReceivedEventArgs e) { AppendLog(e.Data); };
                     p.ErrorDataReceived += delegate(object o, DataReceivedEventArgs e) { AppendLog(e.Data); };
@@ -1809,7 +1823,16 @@ namespace DeepSeekHarness
         {
             try
             {
-                string prefix = RunCaptureStatic("npm", "prefix -g", 15000);
+                // 候选目录先行 (纯文件系统, 毫秒级); npm prefix 慢 (要拉 node) 放后面
+                string[] cands = {
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "npm-global"),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs")
+                };
+                foreach (string c in cands)
+                    if (Directory.Exists(Path.Combine(c, "node_modules"))) return c;
+                // npm 自报 prefix (自定义 prefix 的用户走这里; 8s 上限防慢机卡检测)
+                string prefix = RunCaptureStatic("npm", "prefix -g", 8000);
                 if (!string.IsNullOrEmpty(prefix))
                 {
                     string p = prefix.Trim().Trim('\r', '\n');
@@ -1817,13 +1840,6 @@ namespace DeepSeekHarness
                 }
             }
             catch { }
-            string[] cands = {
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "npm-global"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs")
-            };
-            foreach (string c in cands)
-                if (Directory.Exists(Path.Combine(c, "node_modules"))) return c;
             return "";
         }
 
@@ -2189,7 +2205,7 @@ namespace DeepSeekHarness
         // ---------- 商城拉取 (GitHub 多关键词组合检索 + npm 插件生态 + Awesome 多源聚合) ----------
         static readonly Regex LinkRe = new Regex("\\[([^\\]\\n]*)\\]\\((https://github\\.com/[^)\\s]+)\\)", RegexOptions.Compiled);
 
-        public static List<StoreItem> FetchStore(string proxyIgnored)
+        public static List<StoreItem> FetchStore()
         {
             var got = new List<StoreItem>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2713,11 +2729,9 @@ namespace DeepSeekHarness
         public string CheckLauncherUpdate()
         {
             LauncherUpdateHash = "";
+            // 链定义单一事实源: Net.VersionTxtChains (raw 官方优先 -> jsDelivr -> ghfast)
             var urls = new List<string>();
             if (!string.IsNullOrEmpty(Cfg.LauncherUpdateUrl)) urls.Add(Cfg.LauncherUpdateUrl);
-            urls.Add("https://cdn.jsdelivr.net/gh/loudMore/dsh-launcher@main/version.txt");
-            urls.Add("https://raw.githubusercontent.com/loudMore/dsh-launcher/main/version.txt");
-            urls.Add("https://ghfast.top/https://raw.githubusercontent.com/loudMore/dsh-launcher/main/version.txt");
             foreach (string u in Net.VersionTxtChains) if (!urls.Contains(u)) urls.Add(u);
             foreach (string u in urls)
             {
