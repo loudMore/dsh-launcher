@@ -118,23 +118,55 @@ namespace DeepSeekHarness
         [STAThread]
         static void Main()
         {
+            // 网络层第一行初始化: TLS 1.2+ (不设则 .NET4 默认 TLS1.0, 所有 HTTPS 站点拒绝连接)
+            Net.Init();
+
             // 单实例: 已在运行则发信号让旧窗口弹出, 自己退出
             // 隐藏参数 --sandbox: 换独立 Mutex 名, 允许与生产实例并存 (仅供隔离测试)
+            // 隐藏参数 --install-test: 沙盒检测隔离 + 允许真实安装 (隔离环境端到端安装测试)
+            // 隐藏参数 --net-probe: 纯文本网络诊断, 跑完即退 (不弹 UI, 不起服务)
+            // 隐藏参数 --headless <cmdfile>: 逐行执行命令文件, 结果写 headless-result.txt (自动化测试用)
             bool sandbox = false;
             bool diagTest = false;
+            bool installTest = false;
+            string headlessFile = null;
+            string netProbe = null;   // "1" = 探测; 其余值 = 强制代理地址
             try
             {
-                foreach (string a in Environment.GetCommandLineArgs())
+                string[] args = Environment.GetCommandLineArgs();
+                for (int i = 0; i < args.Length; i++)
                 {
+                    string a = args[i];
                     if (a == "--sandbox") sandbox = true;
                     if (a == "--diag-test") diagTest = true;
+                    if (a == "--install-test") { installTest = true; sandbox = true; }
+                    if (a == "--net-probe") netProbe = "1";
+                    if (a == "--proxy" && i + 1 < args.Length) netProbe = args[i + 1];   // 与 --net-probe 连用: 强制代理
+                    if (a == "--headless" && i + 1 < args.Length) headlessFile = args[i + 1];
                 }
             }
             catch { }
+            if (sandbox) Dsh.SandboxMode = true;
+            if (installTest) Dsh.InstallTestMode = true;
+            if (diagTest) Dsh.DiagTestMode = true;
+
+            // 纯文本诊断/自动化模式: 完全不进 UI, 跑完写结果文件即退出 (供无界面验证)
+            if (netProbe != null || headlessFile != null)
+            {
+                if (netProbe != null)
+                {
+                    if (netProbe != "1") Net.ForceProxy = netProbe;
+                    try { Console.WriteLine(Net.RunNetProbe()); } catch { }
+                }
+                if (headlessFile != null)
+                {
+                    try { Console.WriteLine(HeadlessRun.Run(headlessFile, sandbox)); } catch (Exception ex) { try { Console.WriteLine("HEADLESS ERROR: " + ex); } catch { } }
+                }
+                return;
+            }
+
             bool createdNew;
             singletonMutex = new Mutex(true, "DeepSeekHarness.Launcher.WPF.v1" + (sandbox ? ".sandbox" : ""), out createdNew);
-            if (sandbox) Dsh.SandboxMode = true;
-            if (diagTest) Dsh.DiagTestMode = true;
             if (!createdNew)
             {
                 try { File.WriteAllText(Proc.ReopenFlagPath(), "1"); } catch { }
@@ -632,7 +664,7 @@ namespace DeepSeekHarness
                     long age;
                     var cached = StoreCache.LoadList(out age);
                     sb.AppendLine("cache roundtrip: " + (cached == null ? 0 : cached.Count) + " items, age=" + age);
-                    sb.AppendLine("port8099: " + Dsh.IsPortOpen(8099));
+                    sb.AppendLine("port" + dsh.Cfg.Port + ": " + Dsh.IsPortOpen(dsh.Cfg.Port));
                     string inst = dsh.InstallNpmPlugin("dsh-does-not-exist-zz");
                     sb.AppendLine("npm bad-pkg handled: " + (inst.Length > 0 ? "rejected(" + inst + ")" : "???"));
                     bool ok = dsh.Cfg.Save();
@@ -1954,15 +1986,15 @@ namespace DeepSeekHarness
 
         void RunInstall()
         {
-            // 沙盒模式(隔离测试): 硬禁止真实安装, 防止测试污染用户环境
-            if (Dsh.SandboxMode)
+            // 沙盒模式(隔离测试): 硬禁止真实安装, 防止测试污染用户环境 (--install-test 例外: 隔离端到端安装测试)
+            if (Dsh.SandboxMode && !Dsh.InstallTestMode)
             {
                 sbText.Text = "沙盒模式不执行安装";
                 ShowModernWarn(this, "一键安装", "当前为沙盒测试模式（--sandbox），不执行真实安装。\n正常使用时不会出现此提示。");
                 return;
             }
             // 支持选择是否自定义安装路径
-            string defaultPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "node");
+            string defaultPath = Path.Combine(LauncherConfig.LocalAppData(), "Programs", "node");
             string customPath = Prompt(
                 "一键安装 / 修复环境",
                 "软件会自动检查并补齐缺的东西（缺什么装什么，已装的不动）：\n\n" +
@@ -1974,6 +2006,8 @@ namespace DeepSeekHarness
                 defaultPath
             );
             if (string.IsNullOrEmpty(customPath)) customPath = defaultPath;   // 用户清空输入 → 用默认目录, 不静默取消
+            // 自定义目录必须是绝对路径 (防相对路径/垃圾值产生 iez 式错乱目录)
+            if (!Path.IsPathRooted(customPath)) customPath = defaultPath;
             if (string.IsNullOrEmpty(customPath)) return;
 
             sbText.Text = "正在安装环境…";
@@ -2547,18 +2581,56 @@ namespace DeepSeekHarness
 
         void UpgradeDsh()
         {
-            if (Dsh.SandboxMode)
+            if (Dsh.SandboxMode && !Dsh.InstallTestMode)
             {
                 sbText.Text = "沙盒模式不执行升级";
                 ShowModernWarn(this, "升级 dsh", "当前为沙盒测试模式（--sandbox），不执行真实升级。");
                 return;
             }
+            // 服务占用感知: 8099 在运行且是 dsh 服务时, npm 重装会因文件占用 (EBUSY) 失败。
+            // 必须先征得用户同意 → 短暂停服务 → 升级 → 自动恢复。绝不静默打断用户正在用的服务。
+            if (Dsh.IsPortOpen(dsh.Cfg.Port))
+            {
+                int occ = Dsh.FindPidByPort(dsh.Cfg.Port);
+                bool isDsh = occ > 0 && Dsh.IsDshProcess(occ);
+                if (isDsh)
+                {
+                    bool go = ShowModernConfirm(this, "升级 dsh",
+                        "dsh 服务正在运行（端口 " + dsh.Cfg.Port + "）。\n\n" +
+                        "升级需要短暂停止服务（约 1~2 分钟），升级完成后会自动重新启动。\n\n" +
+                        "确定继续升级？");
+                    if (!go) { sbText.Text = "已取消升级"; return; }
+                }
+            }
             sbText.Text = "正在升级 dsh…";
             SetBusy(true);
+            bool wasRunning = Dsh.IsPortOpen(dsh.Cfg.Port) && dsh.ServerProc != null && !dsh.ServerProc.HasExited;
             var t = new Thread(delegate()
             {
+                // 用户已同意: 停服务 (仅当是自己启动的 ServerProc 或确认是 dsh) → 升级 → 恢复
+                bool needRestore = false;
+                try
+                {
+                    if (Dsh.IsPortOpen(dsh.Cfg.Port))
+                    {
+                        int occ = Dsh.FindPidByPort(dsh.Cfg.Port);
+                        if (occ > 0 && Dsh.IsDshProcess(occ))
+                        {
+                            dsh.StopServiceAsync();
+                            int w = 0;
+                            while (w < 30 && Dsh.IsPortOpen(dsh.Cfg.Port)) { Thread.Sleep(500); w++; }
+                            needRestore = true;
+                        }
+                    }
+                }
+                catch { }
                 string detail;
                 string r = dsh.NpmInstallGlobal(dsh.Cfg.NpmPackage, 300000, out detail);
+                // 恢复服务 (升级前在跑的才恢复, 且端口空闲)
+                if (needRestore && !Dsh.IsPortOpen(dsh.Cfg.Port))
+                {
+                    try { dsh.StartServiceAsync(); } catch { }
+                }
                 var env = dsh.DetectEnvironment();
                 dsh.Env = env;
                 // 重新检查更新状态, 让"立即升级 dsh"按钮立即变为"✓ 已是最新"
@@ -2571,7 +2643,7 @@ namespace DeepSeekHarness
                     RenderOverview();
                     sbText.Text = r == null ? "升级失败" : "dsh 升级完成";
                     if (r == null) ShowModernWarn(this, "升级 dsh", "升级失败（已尝试官方源与国内镜像）。\n" + detail + "\n\n详见 launcher.log。");
-                    else ShowModernInfo(this, "升级 dsh", "dsh 已升级到最新版。");
+                    else ShowModernInfo(this, "升级 dsh", "dsh 已升级到最新版" + (needRestore ? "，服务已自动恢复。" : "。"));
                 }));
             });
             t.IsBackground = true;
