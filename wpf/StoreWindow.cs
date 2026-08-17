@@ -350,7 +350,7 @@ namespace DeepSeekHarness
             {
                 string proxy = null;
                 try { proxy = dsh.ResolveProxy(); } catch { }
-                var got = Dsh.FetchStore(proxy);
+                var got = Dsh.FetchStore();
                 if (got.Count > 0) StoreCache.SaveList(got);
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
