@@ -364,7 +364,6 @@ namespace DeepSeekHarness
         // ============================================================
         //  3. 镜像链 (集中定义, 全部官方优先, 失败逐级回退)
         // ============================================================
-        public const string NpmRegistryOfficial = null;             // npm 默认 = 官方
         public const string NpmRegistryMirror = "https://registry.npmmirror.com";
         public const string NpmRegistryHuawei = "https://mirrors.huaweicloud.com/repository/npm/";
 
@@ -703,7 +702,7 @@ namespace DeepSeekHarness
                         }
                         else if (cmd == "store")
                         {
-                            var items = Dsh.FetchStore(null);
+                            var items = Dsh.FetchStore();
                             sb.AppendLine("   items=" + items.Count);
                         }
                         else if (cmd == "proxy")
