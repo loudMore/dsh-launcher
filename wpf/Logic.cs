@@ -480,7 +480,9 @@ namespace DeepSeekHarness
         public bool DshUpdate;
         public string DshCurrent = "";
         public string DshLatest = "";
+        public bool DshCheckFailed;     // npm 三级源全部查询失败 (≠ 已是最新, UI 必须区分)
         public int PluginCount;
+        public int PluginSkipped;       // 网络不可达跳过的插件数 (不代表无更新)
         public string PluginNames = "";
         public string Detail = "";
     }
@@ -590,7 +592,7 @@ namespace DeepSeekHarness
         // 检测隔离模式: 沙盒 或 安装测试 (都只信进程 PATH, 跳过注册表/深度扫描)
         public static bool SandboxLike { get { return SandboxMode || InstallTestMode; } }
         // 启动器当前版本 (唯一真相源; 所有 UI 显示与升级判断都从这里读, 防止多处硬编码漂移)
-        public const string LauncherVersion = "1.1.1";
+        public const string LauncherVersion = "1.1.2";
 
         public LauncherConfig Cfg;
         public EnvInfo Env = new EnvInfo();
@@ -1416,7 +1418,7 @@ namespace DeepSeekHarness
             worker.Start();
         }
 
-        void Report(string s)
+        public void Report(string s)
         {
             if (OnStatus != null) { try { OnStatus(s); } catch { } }
         }
@@ -1431,18 +1433,37 @@ namespace DeepSeekHarness
         public string QueryNpmLatest(string pkg)
         {
             // 官方源优先, 失败回退国内镜像 (镜像链定义在 Net)
-            string latest = RunCapture("cmd.exe", "/c npm view " + pkg + " version" + NpmRegArg(), 25000);
+            // 每级都向 UI 汇报当前源, 让"检查更新"期间用户知道卡在哪一步
+            Report("正在查询 dsh 最新版本（官方源）…");
+            string latest = ExtractVersionToken(RunCapture("cmd.exe", "/c npm view " + pkg + " version" + NpmRegArg(), 25000));
             if (latest == null)
             {
                 AppendLog("[npm] 官方源查询失败, 回退国内镜像 " + Net.NpmRegistryMirror);
-                latest = RunCapture("cmd.exe", "/c npm view " + pkg + " version --registry " + Net.NpmRegistryMirror, 30000);
+                Report("官方源查询失败, 改用 npmmirror 重试…");
+                latest = ExtractVersionToken(RunCapture("cmd.exe", "/c npm view " + pkg + " version --registry " + Net.NpmRegistryMirror, 30000));
             }
             if (latest == null)
             {
                 AppendLog("[npm] npmmirror 查询失败, 回退华为云 " + Net.NpmRegistryHuawei);
-                latest = RunCapture("cmd.exe", "/c npm view " + pkg + " version --registry " + Net.NpmRegistryHuawei, 30000);
+                Report("npmmirror 查询失败, 改用华为云重试…");
+                latest = ExtractVersionToken(RunCapture("cmd.exe", "/c npm view " + pkg + " version --registry " + Net.NpmRegistryHuawei, 30000));
             }
             return latest;
+        }
+
+        // 从 npm 输出中提取干净的版本号 (取第一行形如 x.y.z[-tag] 的 token;
+        // 防止 npm 打印的警告/提示行污染版本比较导致误报)
+        static string ExtractVersionToken(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return null;
+            string[] lines = s.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string t = lines[i].Trim();
+                if (t.Length > 0 && t[0] == 'v') t = t.Substring(1);
+                if (Regex.IsMatch(t, @"^\d+\.\d+\.\d+(-[\w.]+)?$")) return t;
+            }
+            return null;
         }
 
         public string NpmInstallGlobal(string pkg, int timeoutMs, out string errDetail)
@@ -1493,7 +1514,7 @@ namespace DeepSeekHarness
                 }
                 int code;
                 string outp = RunCaptureOutEnv("cmd.exe", "/c npm " + args, timeoutMs, out code, env.Count > 0 ? env : null);
-                if (code == 0) { errDetail = ""; return outp; }
+                if (code == 0) { errDetail = ""; AppendLog("[npm] install 成功 (尝试 " + shown + "/" + total + ", " + regName + ")"); return outp; }
                 lastOut = outp;
                 AppendLog("[npm] 尝试" + shown + "失败 (exit=" + code + (code == -1 ? " 超时被终止" : "") + "), 输出尾部:\n" + LastLines(outp, 30));
                 // 带代理失败 -> 下一次尝试强制直连这个 npm 进程 (防死代理拖垮所有源)
@@ -1506,7 +1527,7 @@ namespace DeepSeekHarness
                     envDirect["HTTP_PROXY"] = "";
                     envDirect["HTTPS_PROXY"] = "";
                     outp = RunCaptureOutEnv("cmd.exe", "/c npm " + args, timeoutMs, out code, envDirect);
-                    if (code == 0) { errDetail = ""; return outp; }
+                    if (code == 0) { errDetail = ""; AppendLog("[npm] 直连重试成功 (" + regName + ")"); return outp; }
                     lastOut = outp;
                     AppendLog("[npm] 直连重试失败 (exit=" + code + "), 输出尾部:\n" + LastLines(outp, 30));
                 }
@@ -1602,6 +1623,7 @@ namespace DeepSeekHarness
             var info = new UpdateInfo();
             try
             {
+                Report("正在读取本地 dsh 版本…");
                 string pkg = FindDshPackageJson();
                 if (pkg != null)
                 {
@@ -1617,28 +1639,43 @@ namespace DeepSeekHarness
                     if (latest.Length > 0 && latest[0] == 'v') latest = latest.Substring(1);
                     info.DshLatest = latest;
                 }
+                else
+                {
+                    // 三级源全挂: 明确标记"检查失败", 绝不能静默当作"已是最新"
+                    info.DshCheckFailed = true;
+                    AppendLog("[npm] dsh 最新版本查询失败 (官方源/npmmirror/华为云均不可达)");
+                }
                 info.DshUpdate = !string.IsNullOrEmpty(info.DshCurrent) && !string.IsNullOrEmpty(info.DshLatest)
                     && !info.DshCurrent.Equals(info.DshLatest, StringComparison.OrdinalIgnoreCase);
 
-                var names = new List<string>();
+                // 插件扫描: 逐个汇报进度; 网络不可达的插件单独计数 (跳过 ≠ 无更新)
+                var gitDirs = new List<string>();
                 if (Directory.Exists(Cfg.PluginsRoot))
                 {
                     foreach (string dir in Directory.GetDirectories(Cfg.PluginsRoot))
                     {
                         if (!Directory.Exists(Path.Combine(dir, ".git"))) continue;
-                        string name = Path.GetFileName(dir);
-                        if (name.StartsWith("_", StringComparison.Ordinal)) continue;
-                        string branch = FirstLine(RunGit(string.Format("-C \"{0}\" rev-parse --abbrev-ref HEAD", dir), 10000));
-                        if (string.IsNullOrEmpty(branch)) continue;
-                        // 精确判定: fetch 远程分支 → 计算本地落后提交数 (HEAD..FETCH_HEAD)
-                        // 只有"本地确实落后"才算可更新; 哈希不同但本地领先/分叉一律不算
-                        string fetched = RunGit(string.Format("-C \"{0}\" fetch origin {1}", dir, branch), 60000);
-                        if (fetched == null) continue;   // 网络不可达 → 跳过, 不误报
-                        string behind = RunGit(string.Format("-C \"{0}\" rev-list --count HEAD..FETCH_HEAD", dir), 10000);
-                        int n;
-                        if (behind != null && int.TryParse(behind.Trim(), out n) && n > 0)
-                            names.Add(name);
+                        string n = Path.GetFileName(dir);
+                        if (!n.StartsWith("_", StringComparison.Ordinal)) gitDirs.Add(dir);
                     }
+                }
+                var names = new List<string>();
+                for (int gi = 0; gi < gitDirs.Count; gi++)
+                {
+                    string dir = gitDirs[gi];
+                    string name = Path.GetFileName(dir);
+                    Report("正在检查插件 (" + (gi + 1) + "/" + gitDirs.Count + "): " + name + " …");
+                    string branch = FirstLine(RunGit(string.Format("-C \"{0}\" rev-parse --abbrev-ref HEAD", dir), 10000));
+                    if (string.IsNullOrEmpty(branch)) continue;
+                    // 精确判定: fetch 远程分支 → 计算本地落后提交数 (HEAD..FETCH_HEAD)
+                    // 只有"本地确实落后"才算可更新; 哈希不同但本地领先/分叉一律不算
+                    // fetch 超时 30s: RunGit 内部还有 代理→直连→3镜像 共5次尝试, 60s 会放大到 5 分钟/插件
+                    string fetched = RunGit(string.Format("-C \"{0}\" fetch origin {1}", dir, branch), 30000);
+                    if (fetched == null) { info.PluginSkipped++; continue; }   // 网络不可达 → 计数跳过, 不误报
+                    string behind = RunGit(string.Format("-C \"{0}\" rev-list --count HEAD..FETCH_HEAD", dir), 10000);
+                    int n;
+                    if (behind != null && int.TryParse(behind.Trim(), out n) && n > 0)
+                        names.Add(name);
                 }
                 info.PluginCount = names.Count;
                 info.PluginNames = string.Join(", ", names.ToArray());
@@ -1646,6 +1683,8 @@ namespace DeepSeekHarness
                 var parts2 = new List<string>();
                 if (info.DshUpdate) parts2.Add(string.Format("DSH {0} → {1}", info.DshCurrent, info.DshLatest));
                 if (info.PluginCount > 0) parts2.Add(string.Format("插件 {0} 个", info.PluginCount));
+                if (info.DshCheckFailed) parts2.Add("npm 源不可达");
+                if (info.PluginSkipped > 0) parts2.Add(info.PluginSkipped + " 个插件因网络跳过");
                 info.Detail = string.Join(" · ", parts2.ToArray());
             }
             catch { info.HasUpdate = false; }
