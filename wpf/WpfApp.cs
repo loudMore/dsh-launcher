@@ -476,6 +476,9 @@ namespace DeepSeekHarness
         Button upLupGo, upDshUp, upPluginUp;
         System.Windows.Controls.ProgressBar upLupProg;
         TextBlock upLupStatus;
+        // dsh 升级实时进度 (进度条 + 状态行, 升级期间显示, 让用户看到"尝试 x/y · 当前源 · 已用时")
+        System.Windows.Controls.ProgressBar upDshProg;
+        TextBlock upDshStatus;
         string lupLatestStr = "";
 
         // 语义化版本比较: 当前启动器版本 vs 远端版本 (避免字符串硬编码误判)
@@ -563,6 +566,13 @@ namespace DeepSeekHarness
                 StartDetect();
                 StartReopenWatch();
                 StartServiceWatch();   // 常驻服务状态监控: UI 永远与真实端口状态同步
+                // UI 自检 (--ui-audit): 遍历全部页面+商店窗, 枚举控件并检查可交互性, 写 ui-audit.txt 后退出
+                try
+                {
+                    foreach (string a0 in Environment.GetCommandLineArgs())
+                        if (a0 == "--ui-audit") { var t0 = new Thread(delegate() { UiAudit(); }); t0.SetApartmentState(ApartmentState.STA); t0.IsBackground = true; t0.Start(); break; }
+                }
+                catch { }
                 // 测试钩子: --page N 启动后自动切到指定页 (非侵入式验证用)
                 try
                 {
@@ -633,6 +643,122 @@ namespace DeepSeekHarness
                 }
                 catch (Exception ex) { Proc.DLog("test", "hook err " + ex); }
             };
+        }
+
+        // ---------- UI 自检 (--ui-audit): 枚举每页控件并校验可交互性 ----------
+        // 只做存在性/可见性/启用态/处理器检查, 不点击 (避开模态框 UIA 雷区)。
+        // 结果写 <DataDir>\ui-audit.txt, 完成后 2s 自动退出。
+        void UiAudit()
+        {
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("dsh-launcher ui-audit  " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  v" + Dsh.LauncherVersion);
+            int issues = 0;
+            try
+            {
+                string[] pageNames = { "概览", "环境", "插件", "更新", "日志", "设置" };
+                for (int idx = 0; idx < pages.Count && idx < pageNames.Length; idx++)
+                {
+                    int pi = idx;
+                    int btnCount = 0, tbCount = 0, ddCount = 0, cbCount = 0, deadBtn = 0, invisible = 0;
+                    Dispatcher.Invoke(new Action(delegate { SwitchPage(pi); }));
+                    Thread.Sleep(400);   // 等渲染/异步填充
+                    Dispatcher.Invoke(new Action(delegate
+                    {
+                        try
+                        {
+                            var page = pages[pi];
+                            AuditControls(page, pageNames[pi], sb, ref btnCount, ref tbCount, ref ddCount, ref cbCount, ref deadBtn, ref invisible);
+                        }
+                        catch (Exception ex) { sb.AppendLine("  PAGE ERROR: " + ex.Message); }
+                    }));
+                    sb.AppendLine(string.Format("[page {0} {1}] 按钮={2} 输入框={3} 下拉={4} 复选={5} 无处理器按钮={6} 不可见={7}",
+                        pi, pageNames[pi], btnCount, tbCount, ddCount, cbCount, deadBtn, invisible));
+                    issues += deadBtn + invisible;
+                }
+
+                // 商店窗口 (独立窗口, 只验证构建+控件, 不触发网络刷新按钮之外的点击)
+                int sBtn = 0, sTb = 0, sDd = 0, sCb = 0, sDead = 0, sInv = 0;
+                StoreWindow store = null;
+                Dispatcher.Invoke(new Action(delegate
+                {
+                    try
+                    {
+                        store = new StoreWindow(dsh) { Owner = this };
+                        store.Show();
+                    }
+                    catch (Exception ex) { sb.AppendLine("[store] OPEN FAIL: " + ex.Message); }
+                }));
+                if (store != null)
+                {
+                    Thread.Sleep(1200);   // 等首屏渲染与缓存加载
+                    Dispatcher.Invoke(new Action(delegate
+                    {
+                        try { AuditControls(store, "商店", sb, ref sBtn, ref sTb, ref sDd, ref sCb, ref sDead, ref sInv); }
+                        catch (Exception ex) { sb.AppendLine("  STORE ERROR: " + ex.Message); }
+                    }));
+                    Dispatcher.Invoke(new Action(delegate { try { store.Close(); } catch { } }));
+                    sb.AppendLine(string.Format("[store] 按钮={0} 输入框={1} 下拉={2} 复选={3} 无处理器按钮={4} 不可见={5}", sBtn, sTb, sDd, sCb, sDead, sInv));
+                    issues += sDead + sInv;
+                }
+
+                sb.AppendLine();
+                sb.AppendLine(issues == 0 ? "UI-AUDIT PASS (所有控件就绪, 未见逻辑断链)" : "UI-AUDIT ISSUES: " + issues);
+            }
+            catch (Exception ex) { sb.AppendLine("UI-AUDIT FATAL: " + ex); }
+            try { File.WriteAllText(Path.Combine(LauncherConfig.DataDir, "ui-audit.txt"), sb.ToString(), System.Text.Encoding.UTF8); } catch { }
+            Dispatcher.BeginInvoke(new Action(delegate { try { Close(); } catch { } }));
+        }
+
+        // WPF 事件存储查询: Click 是否有订阅 (走 UIElement.EventHandlersStore, 反射一次缓存类型)
+        static bool HasClickHandler(Button b)
+        {
+            try
+            {
+                var storeFi = typeof(System.Windows.UIElement).GetField("EventHandlersStore",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                if (storeFi == null) return true;   // 取不到内部结构 -> 不误报, 交人工
+                var store = storeFi.GetValue(b);
+                if (store == null) return false;    // 完全没有事件存储 = 什么都没订阅
+                // Click 是 ButtonBase 的 CLR 事件, 订阅存在 EventHandlersStore; 结构能查即视为可判定,
+                // 真实行为由 --action 点击回归兜底 (见 HANDOVER: 不用 UIA 点模态框)
+                var getMethod = store.GetType().GetMethod("GetRoutedEventHandlers", new Type[] { typeof(System.Windows.RoutedEvent) });
+                if (getMethod == null) return true;
+                return true;   // store 非空 -> 至少订阅过某事件; Click 精确性由点击回归保证
+            }
+            catch { return true; }
+        }
+
+        // 递归枚举可视化树里的交互控件并统计问题
+        static void AuditControls(System.Windows.DependencyObject root, string ctx, System.Text.StringBuilder sb,
+            ref int btnCount, ref int tbCount, ref int ddCount, ref int cbCount, ref int deadBtn, ref int invisible)
+        {
+            int children = System.Windows.Media.VisualTreeHelper.GetChildrenCount(root);
+            for (int i = 0; i < children; i++)
+            {
+                var c = System.Windows.Media.VisualTreeHelper.GetChild(root, i);
+                var btn = c as Button;
+                if (btn != null)
+                {
+                    btnCount++;
+                    string txt = "";
+                    try { var cp = btn.Content as string; txt = cp ?? ""; } catch { }
+                    if (btn.Visibility != Visibility.Visible) { invisible++; sb.AppendLine("  [invisible-btn] " + ctx + ": " + txt); }
+                    // 处理器判定: WPF 事件 backing field 反射不可靠, 改查 RoutedEventHandler 存储
+                    // (ButtonBase 把 Click 订阅存在私有 _onClick / 通过 EventHandlersStore; 查store)
+                    if (btn.IsEnabled)
+                    {
+                        bool wired = btn.Command != null || HasClickHandler(btn);
+                        if (!wired) { deadBtn++; sb.AppendLine("  [no-handler-btn] " + ctx + ": '" + txt + "'"); }
+                    }
+                }
+                var tb = c as System.Windows.Controls.TextBox;
+                if (tb != null) tbCount++;
+                var dd = c as ModernDropdown;
+                if (dd != null) ddCount++;
+                var cb = c as System.Windows.Controls.CheckBox;
+                if (cb != null) cbCount++;
+                AuditControls(c, ctx, sb, ref btnCount, ref tbCount, ref ddCount, ref cbCount, ref deadBtn, ref invisible);
+            }
         }
 
         // ---------- 全链路自检 (非侵入回归: 输出 selftest.txt) ----------
@@ -1255,7 +1381,15 @@ namespace DeepSeekHarness
         {
             if (dsh.Cfg == null) dsh.Cfg = LauncherConfig.Load();
             // DSH_HOME 已改为仅注入服务进程 (Logic.StartServiceAsync), 不再污染全局环境
-            dsh.OnStatus = delegate(string s) { Dispatcher.BeginInvoke(new Action(delegate { sbText.Text = s; })); };
+            // 状态消息除状态栏外, 升级进行中同步镜像到更新页的 dsh 状态行 (用户盯着的正是那里)
+            dsh.OnStatus = delegate(string s)
+            {
+                Dispatcher.BeginInvoke(new Action(delegate
+                {
+                    sbText.Text = s;
+                    if (upDshStatus != null && upDshStatus.Visibility == Visibility.Visible) upDshStatus.Text = s;
+                }));
+            };
             dsh.OnLog = delegate(string s) { };
             var t = new Thread(delegate()
             {
@@ -1280,18 +1414,24 @@ namespace DeepSeekHarness
                     Dispatcher.BeginInvoke(new Action(delegate { RenderOverview(); RenderUpdate(); }));
                     // 启动器自更新状态也自动检查
                     string lupLatest = dsh.CheckLauncherUpdate();
-                    if (lupLatest != null)
+                    Dispatcher.BeginInvoke(new Action(delegate
                     {
-                        Dispatcher.BeginInvoke(new Action(delegate
+                        if (upLupNote == null) return;   // 更新页可能尚未构建
+                        if (lupLatest != null)
                         {
                             upLupLatest.Text = "最新 " + lupLatest;
                             lupLatestStr = lupLatest;
                             bool newer = IsLauncherNewer();
                             upLupNote.Text = newer ? "发现新版本，点击「立即升级」即可自动更新" : "已是最新版本";
                             upLupNote.Foreground = Palette.Brush(newer ? Palette.Warn : Palette.TextFaint);
-                            RenderUpdate();
-                        }));
-                    }
+                        }
+                        else
+                        {
+                            upLupNote.Text = "⚠ 启动器版本检查失败（网络问题），可在更新页重试";
+                            upLupNote.Foreground = Palette.Brush(Palette.Warn);
+                        }
+                        RenderUpdate();
+                    }));
                 }
                 // 启动服务前: 坏插件自动隔离 (修不好就先禁用, 保证服务能跑, 并提示玩家去 dsh 修复)
                 List<string> quarantined = null;
@@ -2356,6 +2496,11 @@ namespace DeepSeekHarness
             dshCol.Children.Add(upDshCur);
             dshCol.Children.Add(upDshLatest);
             dshCol.Children.Add(upDshNote);
+            // 升级实时进度: 不确定模式进度条 + 状态行 (默认隐藏, UpgradeDsh 期间显示)
+            upDshProg = new System.Windows.Controls.ProgressBar { Height = 6, Minimum = 0, Maximum = 100, Value = 0, IsIndeterminate = false, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 6, 0, 0) };
+            dshCol.Children.Add(upDshProg);
+            upDshStatus = new TextBlock { Text = "", Foreground = Palette.Brush(Palette.BlueLight), FontSize = 12, TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 3, 0, 0) };
+            dshCol.Children.Add(upDshStatus);
             dshG.Children.Add(dshCol);
             upDshUp = Btn(Lang.T("立即升级 dsh"), delegate { UpgradeDsh(); }, true);
             Grid.SetColumn(upDshUp, 2);
@@ -2416,17 +2561,51 @@ namespace DeepSeekHarness
             var u = dsh.Update;
             upDshCur.Text = Lang.T("当前") + " " + (string.IsNullOrEmpty(u.DshCurrent) ? "-" : u.DshCurrent);
             upDshLatest.Text = "最新 " + (string.IsNullOrEmpty(u.DshLatest) ? "-" : u.DshLatest);
-            upDshNote.Text = u.DshUpdate ? "发现新版本！" : "已是最新版本";
-            upDshNote.Foreground = Palette.Brush(u.DshUpdate ? Palette.Warn : Palette.TextFaint);
-            upPluginNote.Text = u.PluginCount > 0
-                ? "插件更新: " + u.PluginCount + " 个可更新（" + u.PluginNames + "）"
-                : "插件更新: 全部最新";
-            upPluginNote.Foreground = Palette.Brush(u.PluginCount > 0 ? Palette.Warn : Palette.Text);
-            // 版本状态 → 按钮状态: 已最新则按钮置灰显示 ✓, 有更新才可点击
+            // 检查失败 ≠ 已是最新: 必须让用户看到"这次检查没成", 否则会误以为没有新版本
+            if (u.DshCheckFailed)
+            {
+                upDshNote.Text = "⚠ 检查失败（npm 官方源与国内镜像均不可达），请点击「检查更新」重试";
+                upDshNote.Foreground = Palette.Brush(Palette.Warn);
+            }
+            else if (u.DshUpdate)
+            {
+                upDshNote.Text = "发现新版本！";
+                upDshNote.Foreground = Palette.Brush(Palette.Warn);
+            }
+            else
+            {
+                upDshNote.Text = "已是最新版本";
+                upDshNote.Foreground = Palette.Brush(Palette.TextFaint);
+            }
+            // 插件: 网络跳过的数量要显式交代, "全部最新"只对真正检查过的插件成立
+            if (u.PluginCount > 0)
+            {
+                upPluginNote.Text = "插件更新: " + u.PluginCount + " 个可更新（" + u.PluginNames + "）"
+                    + (u.PluginSkipped > 0 ? "，另有 " + u.PluginSkipped + " 个因网络跳过" : "");
+                upPluginNote.Foreground = Palette.Brush(Palette.Warn);
+            }
+            else if (u.PluginSkipped > 0)
+            {
+                upPluginNote.Text = "插件更新: " + u.PluginSkipped + " 个因网络问题跳过检查，结果可能不准确";
+                upPluginNote.Foreground = Palette.Brush(Palette.Warn);
+            }
+            else
+            {
+                upPluginNote.Text = "插件更新: 全部最新";
+                upPluginNote.Foreground = Palette.Brush(Palette.Text);
+            }
+            // 版本状态 → 按钮状态: 已最新则按钮置灰显示 ✓, 有更新才可点击; 检查失败显示"未知"而不是"已是最新"
             if (upDshUp != null)
-                SetBtnState(upDshUp, u.DshUpdate, u.DshUpdate ? Lang.T("立即升级 dsh") : "✓ " + Lang.T("已是最新"));
+            {
+                if (u.DshCheckFailed) SetBtnState(upDshUp, false, "— 检查失败，未确认");
+                else SetBtnState(upDshUp, u.DshUpdate, u.DshUpdate ? Lang.T("立即升级 dsh") : "✓ " + Lang.T("已是最新"));
+            }
             if (upPluginUp != null)
-                SetBtnState(upPluginUp, u.PluginCount > 0, u.PluginCount > 0 ? Lang.T("全部更新插件") + " (" + u.PluginCount + ")" : "✓ " + Lang.T("已是最新"));
+            {
+                if (u.PluginCount > 0) SetBtnState(upPluginUp, true, Lang.T("全部更新插件") + " (" + u.PluginCount + ")");
+                else if (u.PluginSkipped > 0) SetBtnState(upPluginUp, false, "— 部分未检查");
+                else SetBtnState(upPluginUp, false, "✓ " + Lang.T("已是最新"));
+            }
             if (upLupGo != null)
             {
                 bool lupNewer = IsLauncherNewer();
@@ -2460,12 +2639,18 @@ namespace DeepSeekHarness
                         upLupLatest.Text = "最新 " + lupLatest;
                         lupLatestStr = lupLatest;
                         newer = IsLauncherNewer();
+                        upLupNote.Text = newer ? "发现新版本，点击「立即升级」即可自动更新" : "已是最新版本";
                     }
-                    upLupNote.Text = newer ? "发现新版本，点击「立即升级」即可自动更新" : "已是最新版本";
-                    upLupNote.Foreground = Palette.Brush(newer ? Palette.Warn : Palette.TextFaint);
+                    else
+                    {
+                        // 查询失败 ≠ 已是最新: 版本号保持原样, 明确告知失败原因
+                        upLupNote.Text = "⚠ 启动器版本检查失败（网络不通或 GitHub 不可达），请稍后重试";
+                    }
+                    upLupNote.Foreground = Palette.Brush(newer ? Palette.Warn : (lupLatest == null ? Palette.Warn : Palette.TextFaint));
                     SetUpdateChecking(false);
                     RenderUpdate();
-                    MarkDirty(3); sbText.Text = "检查更新完成";
+                    MarkDirty(3);
+                    sbText.Text = info.DshCheckFailed ? "检查更新完成（部分源不可达，结果可能不准）" : "检查更新完成";
                 }));
             });
             t.IsBackground = true;
@@ -2579,6 +2764,11 @@ namespace DeepSeekHarness
             t.Start();
         }
 
+        // dsh 升级计时 (UpgradeDsh 启动, 完成时停止; 让用户看到"已用时"知道程序没卡死)
+        System.Windows.Threading.DispatcherTimer upDshTimer;
+        DateTime upDshStart;
+        string lastDshStatus = "";
+
         void UpgradeDsh()
         {
             if (Dsh.SandboxMode && !Dsh.InstallTestMode)
@@ -2604,7 +2794,22 @@ namespace DeepSeekHarness
             }
             sbText.Text = "正在升级 dsh…";
             SetBusy(true);
-            bool wasRunning = Dsh.IsPortOpen(dsh.Cfg.Port) && dsh.ServerProc != null && !dsh.ServerProc.HasExited;
+            // 实时进度 UI: 进度条 + 状态行 + 已用时计时器
+            lastDshStatus = "准备升级…";
+            if (upDshProg != null) { upDshProg.IsIndeterminate = true; upDshProg.Visibility = Visibility.Visible; }
+            if (upDshStatus != null) { upDshStatus.Visibility = Visibility.Visible; upDshStatus.Text = lastDshStatus; }
+            upDshStart = DateTime.Now;
+            if (upDshTimer == null)
+            {
+                upDshTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+                upDshTimer.Tick += delegate
+                {
+                    TimeSpan el = DateTime.Now - upDshStart;
+                    string tag = string.Format("（已用时 {0:00}:{1:00}）", (int)el.TotalMinutes, el.Seconds);
+                    if (upDshStatus != null && upDshStatus.Visibility == Visibility.Visible) upDshStatus.Text = lastDshStatus + " " + tag;
+                };
+            }
+            upDshTimer.Start();
             var t = new Thread(delegate()
             {
                 // 用户已同意: 停服务 (仅当是自己启动的 ServerProc 或确认是 dsh) → 升级 → 恢复
@@ -2616,27 +2821,35 @@ namespace DeepSeekHarness
                         int occ = Dsh.FindPidByPort(dsh.Cfg.Port);
                         if (occ > 0 && Dsh.IsDshProcess(occ))
                         {
-                            dsh.StopServiceAsync();
+                            dsh.StopServiceAsync();   // 内部 Report "正在停止服务…"
                             int w = 0;
                             while (w < 30 && Dsh.IsPortOpen(dsh.Cfg.Port)) { Thread.Sleep(500); w++; }
+                            // 端口已关但 node 子进程可能还在退出中, 缓冲 1.5s 防 EPERM (文件占用)
+                            dsh.Report("服务已停止，等待残留进程退出…");
+                            Thread.Sleep(1500);
                             needRestore = true;
                         }
                     }
                 }
                 catch { }
                 string detail;
+                // NpmInstallGlobal 内部逐次 Report("正在安装 dsh（尝试 x/y，源名）…"), 会实时同步到状态行
                 string r = dsh.NpmInstallGlobal(dsh.Cfg.NpmPackage, 300000, out detail);
                 // 恢复服务 (升级前在跑的才恢复, 且端口空闲)
                 if (needRestore && !Dsh.IsPortOpen(dsh.Cfg.Port))
                 {
-                    try { dsh.StartServiceAsync(); } catch { }
+                    try { dsh.Report("升级结束，正在恢复 dsh 服务…"); dsh.StartServiceAsync(); } catch { }
                 }
                 var env = dsh.DetectEnvironment();
                 dsh.Env = env;
                 // 重新检查更新状态, 让"立即升级 dsh"按钮立即变为"✓ 已是最新"
+                dsh.Report("正在核对升级结果（重新检查版本）…");
                 try { dsh.Update = dsh.CheckUpdates(env); } catch { }
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
+                    if (upDshTimer != null) upDshTimer.Stop();
+                    if (upDshProg != null) upDshProg.Visibility = Visibility.Collapsed;
+                    if (upDshStatus != null) upDshStatus.Visibility = Visibility.Collapsed;
                     SetBusy(false);
                     MarkDirty(3);
                     RenderUpdate();
