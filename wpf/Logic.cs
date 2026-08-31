@@ -592,7 +592,7 @@ namespace DeepSeekHarness
         // 检测隔离模式: 沙盒 或 安装测试 (都只信进程 PATH, 跳过注册表/深度扫描)
         public static bool SandboxLike { get { return SandboxMode || InstallTestMode; } }
         // 启动器当前版本 (唯一真相源; 所有 UI 显示与升级判断都从这里读, 防止多处硬编码漂移)
-        public const string LauncherVersion = "1.1.2";
+        public const string LauncherVersion = "1.1.3";
 
         public LauncherConfig Cfg;
         public EnvInfo Env = new EnvInfo();
@@ -2576,10 +2576,40 @@ namespace DeepSeekHarness
             Report("正在克隆插件 " + name + " …");
             string r = RunGit("clone \"" + url + "\" \"" + target + "\"", 300000);
             AppendLog("[plugin] clone " + url + (r == null ? " (超时/失败)" : " 完成"));
-            if (r != null) return "克隆失败（网络或地址错误）";
+            // RunGit 语义: 成功=输出, 失败=null (v1.1.2 及之前这里写反了: 克隆成功反而报"克隆失败")
+            if (r == null) return "克隆失败（网络或地址错误）";
             // 自动补齐依赖, 防止"装完就崩"
             string depRes = EnsurePluginDepsAfterInstall(target);
-            return depRes;
+            // 装进插件目录后必须挂载进 profile, 否则 dsh loader 解析不到, 插件永远不生效 (GitHub issue #4)
+            string mountRes = MountPluginIntoProfile(target);
+            return CombineInstallResult(depRes, mountRes);
+        }
+
+        // 组装安装结果: deps/挂载两段提示拼合 (空串 = 全部成功)
+        static string CombineInstallResult(string depsRes, string mountRes)
+        {
+            var parts = new List<string>();
+            if (!string.IsNullOrEmpty(depsRes)) parts.Add(depsRes);
+            if (!string.IsNullOrEmpty(mountRes)) parts.Add(mountRes);
+            return string.Join("\n", parts.ToArray());
+        }
+
+        // 将插件挂载进 dsh profile (等价于 dsh plugin --profile web add <dir>)。
+        // dsh loader 按 profile 目录解析插件, 只克隆到 pluginsRoot 的包永远不会生效 (GitHub issue #4)。
+        // 返回 "" = 成功; 非空 = 需要展示给用户的提示 (不阻塞安装本身)。
+        public string MountPluginIntoProfile(string pluginDir)
+        {
+            try
+            {
+                string dsh = !string.IsNullOrEmpty(Env.DshPath) ? Env.DshPath : "dsh";
+                Report("正在把插件挂载进 dsh profile …");
+                string outp = RunCapture("cmd.exe", "/c call \"" + dsh + "\" plugin --profile web add \"" + pluginDir + "\"", 120000);
+                AppendLog("[plugin] profile mount " + pluginDir + " -> " + (outp == null ? "失败" : "完成"));
+                if (outp == null)
+                    return "插件已装入插件目录，但自动挂载 profile 失败（服务重启后不生效）。可手动执行：dsh plugin --profile web add \"" + pluginDir + "\"";
+                return "";
+            }
+            catch { return ""; }
         }
 
         public string InstallNpmPlugin(string pkg)
@@ -2610,7 +2640,9 @@ namespace DeepSeekHarness
                         {
                             cmd_mklink(target, srcDir);
                             string depRes = EnsurePluginDepsAfterInstall(target);
-                            return depRes;
+                            // junction 只解决"文件在哪", 不解决"profile 解析"—— 必须挂载进 profile 才生效 (GitHub issue #4)
+                            string mountRes = MountPluginIntoProfile(target);
+                            return CombineInstallResult(depRes, mountRes);
                         }
                     }
                 }
