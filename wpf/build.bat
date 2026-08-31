@@ -2,10 +2,17 @@
 rem ============================================================
 rem  DeepSeek Harness Launcher - WPF build (no VS / no XAML toolchain)
 rem  Uses only the built-in .NET Framework csc + GAC WPF assemblies
+rem  结果写入 build.log, 结束后 pause 保持窗口, 方便查看报错
 rem ============================================================
 cd /d "%~dp0"
 set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
 if not exist "%CSC%" set CSC=C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe
+if not exist "%CSC%" (
+    echo [FAIL] csc.exe not found: %CSC%
+    echo build result: CSC_MISSING > build.log
+    pause
+    exit /b 1
+)
 
 set GAC=C:\Windows\Microsoft.NET\assembly
 set WPF=/r:%GAC%\GAC_MSIL\PresentationFramework\v4.0_4.0.0.0__31bf3856ad364e35\PresentationFramework.dll
@@ -24,9 +31,14 @@ if exist deepseek.ico set ICO=/win32icon:deepseek.ico
 set MANIFEST=
 if exist app.manifest set MANIFEST=/win32manifest:app.manifest
 
-"%CSC%" /nologo /target:winexe /platform:anycpu /optimize+ %WPF% %RES% %ICO% %MANIFEST% /out:DeepSeekHarness.exe WpfApp.cs Logic.cs StoreWindow.cs Net.cs AssemblyInfo.cs
+echo Building DeepSeekHarness.exe ...
+"%CSC%" /nologo /utf8output /target:winexe /platform:anycpu /optimize+ %WPF% %RES% %ICO% %MANIFEST% /out:DeepSeekHarness.exe WpfApp.cs Logic.cs StoreWindow.cs Net.cs AssemblyInfo.cs > build.log 2>&1
 if %errorlevel%==0 (
     echo [OK] DeepSeekHarness.exe ^(WPF^) built
+    echo build result: OK > build.log
 ) else (
-    echo [FAIL] compile error
+    echo [FAIL] compile error - see build.log
+    type build.log
 )
+echo.
+pause
