@@ -476,9 +476,12 @@ namespace DeepSeekHarness
         Button upLupGo, upDshUp, upPluginUp;
         System.Windows.Controls.ProgressBar upLupProg;
         TextBlock upLupStatus;
-        // dsh 升级实时进度 (进度条 + 状态行, 升级期间显示, 让用户看到"尝试 x/y · 当前源 · 已用时")
+        // dsh 升级实时进度 (步骤条 + 进度条 + 详情/已用时分离, 升级期间显示; 让用户始终知道到了第几步)
         System.Windows.Controls.ProgressBar upDshProg;
         TextBlock upDshStatus;
+        System.Windows.Controls.StackPanel upDshPanel;
+        System.Windows.Controls.StackPanel upDshSteps;
+        TextBlock upDshElapsed;
         string lupLatestStr = "";
 
         // 语义化版本比较: 当前启动器版本 vs 远端版本 (避免字符串硬编码误判)
@@ -1387,7 +1390,11 @@ namespace DeepSeekHarness
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     sbText.Text = s;
-                    if (upDshStatus != null && upDshStatus.Visibility == Visibility.Visible) upDshStatus.Text = s;
+                    if (upDshStatus != null && upDshPanel != null && upDshPanel.Visibility == Visibility.Visible)
+                    {
+                        upDshStatus.Text = s;
+                        UpdateDshStageFromStatus(s);
+                    }
                 }));
             };
             dsh.OnLog = delegate(string s) { };
@@ -1480,20 +1487,20 @@ namespace DeepSeekHarness
                     catch { }
                 }
 
-                // 有被隔离的坏插件 → 提示玩家并附 dsh 修复提示词
+                // 有依赖修不好的插件 → 提示用户 (不再自动隔离, 插件保持原样, 由用户决定修复或禁用)
                 if (quarantined != null && quarantined.Count > 0)
                 {
                     var hint = new StringBuilder();
-                    hint.AppendLine(Lang.T("以下插件因缺少依赖被暂时禁用，服务已正常启动："));
+                    hint.AppendLine(Lang.T("以下插件依赖缺失且自动修复未成功（未做隔离，插件保持原样）："));
                     hint.AppendLine();
                     foreach (string q in quarantined) hint.AppendLine("  ⚠️ " + q);
                     hint.AppendLine();
-                    hint.AppendLine(Lang.T("修复后重启服务即可恢复。可在「插件」页一键修复依赖，或在 dsh 终端执行:"));
+                    hint.AppendLine(Lang.T("可在「插件」页一键修复依赖，修复后重启服务；或在 dsh 终端执行:"));
                     hint.AppendLine("  npm install -g <缺失依赖>");
                     hint.AppendLine("  cd <插件目录> && npm install");
                     Dispatcher.BeginInvoke(new Action(delegate
                     {
-                        ShowModernWarn(this, Lang.T("插件已被隔离"), hint.ToString());
+                        ShowModernWarn(this, Lang.T("插件依赖异常"), hint.ToString());
                         pageDirty[2] = true;   // 插件页下次进入刷新
                     }));
                 }
@@ -2496,11 +2503,34 @@ namespace DeepSeekHarness
             dshCol.Children.Add(upDshCur);
             dshCol.Children.Add(upDshLatest);
             dshCol.Children.Add(upDshNote);
-            // 升级实时进度: 不确定模式进度条 + 状态行 (默认隐藏, UpgradeDsh 期间显示)
-            upDshProg = new System.Windows.Controls.ProgressBar { Height = 6, Minimum = 0, Maximum = 100, Value = 0, IsIndeterminate = false, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 6, 0, 0) };
-            dshCol.Children.Add(upDshProg);
-            upDshStatus = new TextBlock { Text = "", Foreground = Palette.Brush(Palette.BlueLight), FontSize = 12, TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed, Margin = new Thickness(0, 3, 0, 0) };
-            dshCol.Children.Add(upDshStatus);
+            // 升级实时进度面板: 步骤条(停止服务→安装→恢复服务→核对) + 进度条 + 详情/已用时分离
+            // (默认隐藏, UpgradeDsh 期间显示; 详情行只放状态文本避免换行, 已用时固定在右侧等宽字体)
+            upDshPanel = new StackPanel { Visibility = Visibility.Collapsed, Margin = new Thickness(0, 8, 0, 0) };
+            upDshSteps = new StackPanel { Orientation = Orientation.Horizontal };
+            upDshPanel.Children.Add(upDshSteps);
+            upDshProg = new System.Windows.Controls.ProgressBar
+            {
+                Height = 4,
+                Minimum = 0,
+                Maximum = 100,
+                Value = 0,
+                IsIndeterminate = true,
+                Foreground = Palette.Brush(Palette.Blue),
+                Background = Palette.BrushA(Palette.TextFaint, 40),
+                BorderThickness = new Thickness(0),
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                Margin = new Thickness(0, 8, 0, 0),
+                Visibility = Visibility.Collapsed
+            };
+            upDshPanel.Children.Add(upDshProg);
+            var dshDetailDock = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 5, 0, 0) };
+            upDshElapsed = new TextBlock { Text = "", Foreground = Palette.Brush(Palette.TextFaint), FontSize = 11, FontFamily = new FontFamily("Consolas"), VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(8, 0, 0, 0) };
+            DockPanel.SetDock(upDshElapsed, Dock.Right);
+            upDshStatus = new TextBlock { Text = "", Foreground = Palette.Brush(Palette.BlueLight), FontSize = 12, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Top };
+            dshDetailDock.Children.Add(upDshElapsed);
+            dshDetailDock.Children.Add(upDshStatus);
+            upDshPanel.Children.Add(dshDetailDock);
+            dshCol.Children.Add(upDshPanel);
             dshG.Children.Add(dshCol);
             upDshUp = Btn(Lang.T("立即升级 dsh"), delegate { UpgradeDsh(); }, true);
             Grid.SetColumn(upDshUp, 2);
@@ -2764,10 +2794,9 @@ namespace DeepSeekHarness
             t.Start();
         }
 
-        // dsh 升级计时 (UpgradeDsh 启动, 完成时停止; 让用户看到"已用时"知道程序没卡死)
+        // dsh 升级计时 (UpgradeDsh 启动, 完成时停止; 已用时显示在详情行右侧固定位置)
         System.Windows.Threading.DispatcherTimer upDshTimer;
         DateTime upDshStart;
-        string lastDshStatus = "";
 
         void UpgradeDsh()
         {
@@ -2794,10 +2823,12 @@ namespace DeepSeekHarness
             }
             sbText.Text = "正在升级 dsh…";
             SetBusy(true);
-            // 实时进度 UI: 进度条 + 状态行 + 已用时计时器
-            lastDshStatus = "准备升级…";
-            if (upDshProg != null) { upDshProg.IsIndeterminate = true; upDshProg.Visibility = Visibility.Visible; }
-            if (upDshStatus != null) { upDshStatus.Visibility = Visibility.Visible; upDshStatus.Text = lastDshStatus; }
+            // 实时进度 UI: 步骤条 + 进度条 + 详情行(纯状态) + 已用时(右侧固定, 不再拼进状态文本导致换行)
+            if (upDshPanel != null) { upDshPanel.Visibility = Visibility.Visible; RenderDshSteps(-1, null); }
+            if (upDshProg != null) { upDshProg.IsIndeterminate = true; upDshProg.Value = 0; upDshProg.Visibility = Visibility.Visible; }
+            if (upDshStatus != null) { upDshStatus.Text = "准备升级…"; }
+            if (upDshElapsed != null) upDshElapsed.Text = "已用时 00:00";
+            if (upDshUp != null) { upDshUp.IsEnabled = false; upDshUp.Content = Lang.T("升级中…"); }
             upDshStart = DateTime.Now;
             if (upDshTimer == null)
             {
@@ -2805,8 +2836,7 @@ namespace DeepSeekHarness
                 upDshTimer.Tick += delegate
                 {
                     TimeSpan el = DateTime.Now - upDshStart;
-                    string tag = string.Format("（已用时 {0:00}:{1:00}）", (int)el.TotalMinutes, el.Seconds);
-                    if (upDshStatus != null && upDshStatus.Visibility == Visibility.Visible) upDshStatus.Text = lastDshStatus + " " + tag;
+                    if (upDshElapsed != null) upDshElapsed.Text = string.Format("已用时 {0:00}:{1:00}", (int)el.TotalMinutes, el.Seconds);
                 };
             }
             upDshTimer.Start();
@@ -2848,8 +2878,8 @@ namespace DeepSeekHarness
                 Dispatcher.BeginInvoke(new Action(delegate
                 {
                     if (upDshTimer != null) upDshTimer.Stop();
-                    if (upDshProg != null) upDshProg.Visibility = Visibility.Collapsed;
-                    if (upDshStatus != null) upDshStatus.Visibility = Visibility.Collapsed;
+                    if (upDshPanel != null) upDshPanel.Visibility = Visibility.Collapsed;
+                    if (upDshUp != null) { upDshUp.IsEnabled = true; upDshUp.Content = Lang.T("立即升级 dsh"); }
                     SetBusy(false);
                     MarkDirty(3);
                     RenderUpdate();
@@ -2861,6 +2891,86 @@ namespace DeepSeekHarness
             });
             t.IsBackground = true;
             t.Start();
+        }
+
+        // ---------- dsh 升级步骤条 ----------
+        // 四个固定阶段: 停止服务 → 安装 dsh → 恢复服务 → 核对结果
+        // active: 当前阶段下标 (-1=尚未开始); done: 已完成阶段标记 (null=无)
+        static readonly string[] DshStepNames = new string[] { "停止服务", "安装 dsh", "恢复服务", "核对结果" };
+
+        void RenderDshSteps(int active, bool[] done)
+        {
+            try
+            {
+                if (upDshSteps == null) return;
+                upDshSteps.Children.Clear();
+                for (int i = 0; i < DshStepNames.Length; i++)
+                {
+                    bool isDone = done != null && i < done.Length && done[i];
+                    bool isActive = i == active;
+                    string icon = isDone ? "✔" : (isActive ? "◉" : "○");
+                    Color c = isDone ? Palette.Success : (isActive ? Palette.BlueLight : Palette.TextFaint);
+                    var tb = new TextBlock
+                    {
+                        Text = icon + " " + DshStepNames[i],
+                        FontSize = 11.5,
+                        Foreground = Palette.Brush(c),
+                        FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Normal,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Margin = new Thickness(0, 0, 16, 0)
+                    };
+                    upDshSteps.Children.Add(tb);
+                    if (i < DshStepNames.Length - 1)
+                        upDshSteps.Children.Add(new TextBlock { Text = "›", FontSize = 11, Foreground = Palette.Brush(Palette.TextFaint), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) });
+                }
+            }
+            catch { }
+        }
+
+        // 从状态文本推断升级所处阶段 → 驱动步骤条与进度条 (升级面板可见时才生效)
+        void UpdateDshStageFromStatus(string s)
+        {
+            if (upDshPanel == null || upDshPanel.Visibility != Visibility.Visible) return;
+            try
+            {
+                if (s.IndexOf("停止服务", StringComparison.Ordinal) >= 0 || s.IndexOf("残留进程", StringComparison.Ordinal) >= 0)
+                {
+                    RenderDshSteps(0, null);
+                    if (upDshProg != null) upDshProg.IsIndeterminate = true;
+                    return;
+                }
+                if (s.IndexOf("安装 dsh", StringComparison.Ordinal) >= 0 || s.IndexOf("尝试", StringComparison.Ordinal) >= 0)
+                {
+                    RenderDshSteps(1, new bool[] { true, false, false, false });
+                    if (upDshProg != null)
+                    {
+                        var m = System.Text.RegularExpressions.Regex.Match(s, "尝试\\s*(\\d+)\\s*/\\s*(\\d+)");
+                        if (m.Success)
+                        {
+                            int x = int.Parse(m.Groups[1].Value), y = int.Parse(m.Groups[2].Value);
+                            if (y > 0)
+                            {
+                                upDshProg.IsIndeterminate = false;
+                                double v = 5 + 60.0 * Math.Min(x - 1, y) / y;   // 每次尝试占一段进度
+                                if (upDshProg.Value < v) upDshProg.Value = v;
+                            }
+                        }
+                    }
+                    return;
+                }
+                if (s.IndexOf("恢复", StringComparison.Ordinal) >= 0 && s.IndexOf("服务", StringComparison.Ordinal) >= 0)
+                {
+                    RenderDshSteps(2, new bool[] { true, true, false, false });
+                    if (upDshProg != null) { upDshProg.IsIndeterminate = false; upDshProg.Value = Math.Max(upDshProg.Value, 88); }
+                    return;
+                }
+                if (s.IndexOf("核对", StringComparison.Ordinal) >= 0)
+                {
+                    RenderDshSteps(3, new bool[] { true, true, true, false });
+                    if (upDshProg != null) { upDshProg.IsIndeterminate = false; upDshProg.Value = Math.Max(upDshProg.Value, 96); }
+                }
+            }
+            catch { }
         }
 
         // ---------- 日志页 (专业极客终端 + 左右均衡工具栏 + 快捷工具) ----------
