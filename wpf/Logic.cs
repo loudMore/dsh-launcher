@@ -592,7 +592,7 @@ namespace DeepSeekHarness
         // 检测隔离模式: 沙盒 或 安装测试 (都只信进程 PATH, 跳过注册表/深度扫描)
         public static bool SandboxLike { get { return SandboxMode || InstallTestMode; } }
         // 启动器当前版本 (唯一真相源; 所有 UI 显示与升级判断都从这里读, 防止多处硬编码漂移)
-        public const string LauncherVersion = "1.1.3";
+        public const string LauncherVersion = "1.1.4";
 
         public LauncherConfig Cfg;
         public EnvInfo Env = new EnvInfo();
@@ -1792,6 +1792,23 @@ namespace DeepSeekHarness
             return deps;
         }
 
+        // dsh 宿主回退层: <dshHome>\profiles\node_modules — dsh 用它给全部 @deepseek-ai/* 提供 junction,
+        // 插件依赖解析必须认这个层, 否则会对宿主正常提供着的包误报"缺失" (#6)
+        static string DshProfilesNmDir()
+        {
+            try
+            {
+                var cfg = LauncherConfig.Load();
+                if (!string.IsNullOrEmpty(cfg.DshHome))
+                {
+                    string p = Path.Combine(cfg.DshHome, "profiles", "node_modules");
+                    if (Directory.Exists(p)) return p;
+                }
+            }
+            catch { }
+            return "";
+        }
+
         // 检查某依赖在插件目录下是否可解析 (node_modules 可能是指向共享目录的 junction)
         static bool DepResolvable(string pluginDir, string dep)
         {
@@ -1815,6 +1832,18 @@ namespace DeepSeekHarness
                     string scope2 = dep.Substring(0, slash);
                     string name2 = dep.Substring(slash + 1);
                     if (Directory.Exists(Path.Combine(shared, scope2, name2))) return true;
+                }
+                // dsh 宿主回退层兜底 (#6): 宿主提供的包在这里解析成功就不算缺
+                string hostNm = DshProfilesNmDir();
+                if (hostNm.Length > 0)
+                {
+                    if (Directory.Exists(Path.Combine(hostNm, dep))) return true;
+                    if (slash > 0)
+                    {
+                        string scope3 = dep.Substring(0, slash);
+                        string name3 = dep.Substring(slash + 1);
+                        if (Directory.Exists(Path.Combine(hostNm, scope3, name3))) return true;
+                    }
                 }
                 return false;
             }
@@ -1840,12 +1869,16 @@ namespace DeepSeekHarness
                         if (File.Exists(cand)) { pkgJson = cand; break; }
                     }
                 }
-                var deps = ParsePkgDeps(pkgJson, true);
+                // peerDependencies 不参与缺失判定 (#6): peer 的语义就是"由宿主提供",
+                // 把它当必装依赖会对声明宿主 peer 的第三方插件 100% 误报
+                var deps = ParsePkgDeps(pkgJson, false);
                 if (deps.Count == 0) return;   // 无依赖声明 → 视为 OK
                 var missing = new List<string>();
                 foreach (var kv in deps)
                 {
-                    if (kv.Key == "@deepseek-ai/dsh" || kv.Key == "dsh" || kv.Key == "cordis") continue;   // 宿主包不算
+                    // 宿主提供、插件不应自装的包 (#6): 整个 @deepseek-ai/* 命名空间 + 常见宿主 peer
+                    if (kv.Key.StartsWith("@deepseek-ai/", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (kv.Key == "dsh" || kv.Key == "cordis" || kv.Key == "react" || kv.Key == "react-dom") continue;
                     if (!DepResolvable(p.Path, kv.Key)) missing.Add(kv.Key);
                 }
                 if (missing.Count > 0)
@@ -1947,7 +1980,8 @@ namespace DeepSeekHarness
         }
 
         // ---------- 坏插件自动隔离: 修复不了就先禁用, 保证服务能跑 ----------
-        // 扫描缺依赖的插件, 自动挂 .disabled 隔离, 返回隔离清单
+        // 扫描缺依赖的插件, 尝试自动修复; 修不好的**不再自动改名隔离** (#6) —
+        // 隔离是否定性破坏动作 (会连带弄坏 profile 的 file: 引用), 改为保留原样 + 返回清单由 UI 提示用户手动处理
         public List<string> QuarantineBrokenPlugins()
         {
             var quarantined = new List<string>();
@@ -1968,17 +2002,9 @@ namespace DeepSeekHarness
                         CheckPluginDeps(p);
                         if (!p.DepsOk)
                         {
-                            // 修不好 → 隔离
-                            try
-                            {
-                                Directory.Move(d, d + ".disabled");
-                                quarantined.Add(dirName + "（缺: " + p.MissingDeps + "）");
-                                AppendLog("[plugin] QUARANTINED " + dirName + " missing: " + p.MissingDeps);
-                            }
-                            catch (Exception ex)
-                            {
-                                AppendLog("[plugin] quarantine failed " + dirName + ": " + ex.Message);
-                            }
+                            // 修不好 → 保留原样, 只记录 + 提示 (#6: 不再 Directory.Move 隔离)
+                            quarantined.Add(dirName + "（缺: " + p.MissingDeps + "，未隔离，保持原样）");
+                            AppendLog("[plugin] DEPS-BROKEN (kept, no quarantine) " + dirName + " missing: " + p.MissingDeps);
                         }
                         else
                         {
@@ -2666,13 +2692,107 @@ namespace DeepSeekHarness
             catch (Exception ex) { return ex.Message; }
         }
 
+        // 读取插件 package.json 的 name 字段 (挂载时 dsh 用它作为 profile 里的包名)
+        static string ReadPluginPkgName(string pluginDir)
+        {
+            try
+            {
+                string pkgJson = Path.Combine(pluginDir, "package.json");
+                if (!File.Exists(pkgJson))
+                {
+                    foreach (string sub in Directory.GetDirectories(pluginDir))
+                    {
+                        string cand = Path.Combine(sub, "package.json");
+                        if (File.Exists(cand)) { pkgJson = cand; break; }
+                    }
+                }
+                if (!File.Exists(pkgJson)) return "";
+                var ser = new JavaScriptSerializer();
+                var d = ser.DeserializeObject(File.ReadAllText(pkgJson)) as Dictionary<string, object>;
+                object n;
+                if (d != null && d.TryGetValue("name", out n)) return Convert.ToString(n) ?? "";
+            }
+            catch { }
+            return "";
+        }
+
+        // 卸载时反向摘除 profile 挂载: 安装时 MountPluginIntoProfile 会把插件**完整复制**进
+        // profiles\web\node_modules\@dsh-external\<npm名> (实测是拷贝不是链接), 只删插件目录
+        // 不摘 profile 的话, 重启服务后副本照样加载 → "卸载了还生效" (用户实测确认)
+        public string UnmountPluginFromProfile(string pluginName)
+        {
+            try
+            {
+                string dsh = !string.IsNullOrEmpty(Env.DshPath) ? Env.DshPath : "dsh";
+                Report("正在把插件从 dsh profile 摘除 …");
+                string outp = RunCapture("cmd.exe", "/c call \"" + dsh + "\" plugin --profile web remove \"" + pluginName + "\"", 120000);
+                AppendLog("[plugin] profile unmount " + pluginName + " -> " + (outp == null ? "失败" : "完成"));
+                if (outp == null)
+                    AppendLog("[plugin] 自动摘除 profile 失败（稍后有残留清扫兜底）。可手动执行：dsh plugin --profile web remove \"" + pluginName + "\"");
+                return outp == null ? "manual" : "ok";
+            }
+            catch { return "manual"; }
+        }
+
+        // 兜底清扫: profile 里残留的插件副本 (dsh CLI remove 可能漏删; 直接删掉保证卸载干净)
+        // 实测落点: <dshHome>\profiles\web\node_modules\@dsh-external\<npm名> (完整拷贝, 不是链接)
+        public bool SweepProfileLeftover(string pluginName, string pkgName)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(Cfg.DshHome) || string.IsNullOrEmpty(pluginName)) return true;
+                string webExt = Path.Combine(Cfg.DshHome, "profiles", "web", "node_modules", "@dsh-external");
+                var cands = new List<string>();
+                if (!string.IsNullOrEmpty(pkgName) && pkgName.StartsWith("@dsh-external/", StringComparison.OrdinalIgnoreCase))
+                    cands.Add(Path.Combine(webExt, pkgName.Substring("@dsh-external/".Length)));
+                // 兜底: 目录名 / 无命名空间的包名 也各试一处
+                cands.Add(Path.Combine(webExt, pluginName));
+                if (!string.IsNullOrEmpty(pkgName)) cands.Add(Path.Combine(webExt, pkgName));
+                bool ok = true;
+                foreach (string c in cands)
+                {
+                    if (Directory.Exists(c))
+                    {
+                        try
+                        {
+                            ClearReadOnly(c);
+                            Directory.Delete(c, true);
+                            AppendLog("[plugin] profile leftover removed: " + c);
+                        }
+                        catch (Exception ex)
+                        {
+                            AppendLog("[plugin] profile leftover cleanup failed " + c + ": " + ex.Message);
+                            ok = false;
+                        }
+                    }
+                }
+                return ok;
+            }
+            catch (Exception ex)
+            {
+                AppendLog("[plugin] profile leftover cleanup failed " + pluginName + ": " + ex.Message);
+                return false;
+            }
+        }
+
         public string UninstallPlugin(PluginItem p)
         {
             try
             {
+                // 0. 读取包名 (挂载/清扫都按它定位), 趁目录还在
+                string pkgName = ReadPluginPkgName(p.Path);
+                // 1. 先摘 profile 挂载 (优先按包名, 失败再用目录名); 失败不阻断, 后面有清扫兜底
+                string um = UnmountPluginFromProfile(string.IsNullOrEmpty(pkgName) ? p.Name : pkgName);
+                if (um != "ok" && !string.IsNullOrEmpty(pkgName) && pkgName != p.Name)
+                    um = UnmountPluginFromProfile(p.Name);
+                // 2. 删插件目录
                 ClearReadOnly(p.Path);   // git 松散对象是只读文件, 必须先清除只读属性
                 Directory.Delete(p.Path, true);
-                Report("已卸载插件 " + p.Name);
+                // 3. 兜底清扫 profile node_modules 里的残留副本
+                string sweepNote = "";
+                if (um != "ok" && !SweepProfileLeftover(p.Name, pkgName))
+                    sweepNote = "（注意: profile 残留清理失败, 可手动执行 dsh plugin --profile web remove \"" + (string.IsNullOrEmpty(pkgName) ? p.Name : pkgName) + "\"）";
+                Report("已卸载插件 " + p.Name + sweepNote);
                 return "";
             }
             catch (Exception ex) { return "目录可能被占用或权限不足：" + ex.Message; }
